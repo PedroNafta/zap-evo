@@ -224,12 +224,16 @@ def formatar(texto: str, cor_link: str = "#53bdeb") -> str:
         lambda m: guardar(f"<code>{_escapar(m.group(1))}</code>"), texto
     )
     texto = _escapar(texto)
-    texto = _URL.sub(
-        lambda m: guardar(
-            f"<a href='{m.group(0)}' style='color:{cor_link}'>{m.group(0)}</a>"
-        ),
-        texto,
-    )
+    def link(m) -> str:
+        # pontuação colada no fim é da frase, não da URL ("veja x.com.br.")
+        url, cauda = m.group(0), ""
+        while url and url[-1] in ".,!?;:)":
+            url, cauda = url[:-1], url[-1] + cauda
+        # "www.x.com" sem esquema: o href relativo não abre em lugar nenhum
+        href = url if url.startswith(("http://", "https://")) else "https://" + url
+        return guardar(f"<a href='{href}' style='color:{cor_link}'>{url}</a>") + cauda
+
+    texto = _URL.sub(link, texto)
 
     linhas, saida = texto.split("\n"), []
     for linha in linhas:
@@ -2004,6 +2008,8 @@ if __name__ == "__main__":
               f"deduplicadas na inserção)")
 
     assert text_of({"message": {"conversation": "oi"}}) == "oi"
+    assert "href='https://www.x.com.br'" in formatar("veja www.x.com.br."), "www sem esquema"
+    assert formatar("veja www.x.com.br.").endswith("</a>."), "ponto final virou URL"
     assert text_of({"message": {"locationMessage": {"name": "Recife",
         "address": "PE"}}}) == "📍 Recife — PE", "location perde nome/endereco"
     assert text_of({"message": {"locationMessage": {}}}) == "📍 Localização"

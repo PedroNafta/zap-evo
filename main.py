@@ -49,6 +49,7 @@ from PySide6.QtCore import (
     QModelIndex,
     QObject,
     QPoint,
+    QPointF,
     QRect,
     QRectF,
     QSize,
@@ -56,6 +57,9 @@ from PySide6.QtCore import (
     QTimer,
     QUrl,
     Signal,
+    QLibraryInfo,
+    QLocale,
+    QTranslator,
 )
 from PySide6.QtDBus import QDBus, QDBusConnection, QDBusInterface
 from PySide6.QtGui import (
@@ -98,9 +102,11 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QSplitter,
+    QSplitterHandle,
     QStackedWidget,
     QStyleOptionViewItem,
     QStyle,
@@ -348,6 +354,31 @@ class Escala:
 
 ESCALA = Escala()
 
+# Tamanhos fixos que acompanham o Ctrl +/-: o valor guardado é o da escala
+# base e zoom() reaplica todos. Antes 33 tamanhos em px cru ignoravam a escala
+# e o zoom só mexia na fonte — os botões ficavam do mesmo tamanho.
+FIXOS: list = []
+
+
+def fixo(w, larg: int | None = None, alt: int | None = None):
+    FIXOS.append((w, larg, alt))
+    _aplicar_fixo(w, larg, alt)
+    return w
+
+
+def _aplicar_fixo(w, larg, alt):
+    if larg:
+        w.setFixedWidth(ESCALA.e(larg))
+    if alt:
+        w.setFixedHeight(ESCALA.e(alt))
+
+
+def reaplicar_fixos():
+    FIXOS[:] = [f for f in FIXOS if shiboken6.isValid(f[0])]  # diálogos fechados saem
+    for w, larg, alt in FIXOS:
+        _aplicar_fixo(w, larg, alt)
+
+
 def _mix(a: str, b: str, t: float) -> str:
     """Mistura dois hex. Serve para derivar estados sem escrever cor à mão."""
     ca, cb = QColor(a), QColor(b)
@@ -572,7 +603,13 @@ QPushButton {{ background:transparent; border:none;
 QPushButton:hover {{ background:{P['selecao']}; border-radius:6px; }}
 QLabel#titulo {{ background:transparent; font-weight:600; font-size:{ESCALA.px()+1}px; }}
 QStatusBar {{ background:{P['painel']}; color:{P['fraco']}; border-top:1px solid {P['divisor']}; }}
-QSplitter::handle {{ background:{P['divisor']}; width:1px; }}
+QSplitter::handle {{ background:transparent; border-left:1px solid {P['divisor']}; }}
+QSplitter::handle:hover, QSplitter::handle:pressed {{ background:{P['selecao']}; border-left:2px solid {P['accent']}; }}
+#pilula {{ background:{P['selecao']}; border-radius:8px; }}
+#pilula QTextEdit, #pilula QTextEdit:focus {{ background:transparent; border:none; }}
+#pilula QPushButton {{ background:transparent; border:none; }}
+#b_mais {{ font-size:{ESCALA.px() + 8}px; }}
+#b_mais::menu-indicator {{ image:none; width:0px; }}
 QScrollBar:vertical {{ background:transparent; width:8px; margin:0; }}
 QScrollBar::handle:vertical {{ background:{P['barra']}; border-radius:4px; min-height:30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height:0; }}
@@ -875,7 +912,13 @@ class ItemChat(QStyledItemDelegate):
     """Linha da barra lateral no formato do WhatsApp Web: avatar, nome, marca de
     leitura + autor + prévia, hora, contador de não lidas, sino e pino."""
 
-    ALTURA, PAD, LADO = 72, 12, 49
+    # propriedades, não constantes: a linha acompanha o Ctrl +/- como a bolha
+    @property
+    def ALTURA(self): return ESCALA.e(72)
+    @property
+    def PAD(self): return ESCALA.e(12)
+    @property
+    def LADO(self): return ESCALA.e(49)
 
     def sizeHint(self, opt, ix):
         return QSize(0, self.ALTURA)
@@ -1093,6 +1136,10 @@ class Balao(QStyledItemDelegate):
         # A Janela carimba: `contato` ao abrir a conversa, `eu` uma vez no boot.
         self.contato: tuple[str, str, str] = ("", "", "")  # (nome, jid, caminho)
         self.eu: tuple[str, str, str] = ("", "", "")
+        # Onde o paint desenhou o texto e o cartão de link de cada mensagem,
+        # relativo ao topo-esquerdo do item: o clique em link consulta isto em
+        # vez de replicar a geometria (que depende de cabeçalho, citação, mídia).
+        self.links: dict[str, dict] = {}
 
     # ponytail: property em vez de constante — sem isto nada acompanha o Ctrl+=.
     # Um round() por acesso custa ~80ns; o QFontMetrics do mesmo _medir custa
@@ -1454,6 +1501,19 @@ class Balao(QStyledItemDelegate):
         p.setFont(f)
         p.drawText(selo, Qt.AlignCenter, "🎤")
 
+    def link_em(self, rect: QRect, msg: dict, ponto: QPoint) -> str:
+        """URL sob o ponto (coordenadas do viewport), ou "" — texto ou cartão."""
+        alvo = self.links.get((msg.get("key") or {}).get("id", "")) or {}
+        rel = ponto - rect.topLeft()
+        if cartao := alvo.get("cartao"):
+            area, url = cartao
+            if url and area.contains(rel):
+                return url
+        if texto := alvo.get("texto"):
+            canto, doc = texto
+            return doc.documentLayout().anchorAt(QPointF(rel - canto)) or ""
+        return ""
+
     @staticmethod
     def _pilula_velocidade(p, r: QRect):
         alt = max(ESCALA.e(20), r.height() * 2 // 3)
@@ -1799,14 +1859,24 @@ class Balao(QStyledItemDelegate):
         elif cartao == "contato":
             self._pintar_contato(p, opt, caixa, y, det)
             y += self.CARTAO
-        elif cartao == "link":
+        if len(self.links) > 2000:  # ponytail: teto simples; o que está na tela repinta
+            self.links.clear()
+        alvo = self.links.setdefault((msg.get("key") or {}).get("id", ""), {})
+        alvo.clear()
+        origem = opt.rect.topLeft()
+        if cartao == "link":
+            alto_cartao = int((det.get("link") or {}).get("_img_h") or 0) + self.LINK
+            alvo["cartao"] = (QRect(caixa.left() + self.PAD, y, caixa.width() - self.PAD * 2,
+                                    alto_cartao).translated(-origem),
+                              (det.get("link") or {}).get("url") or "")
             self._pintar_link(p, opt, caixa, y, det, meu)
-            y += int((det.get("link") or {}).get("_img_h") or 0) + self.LINK
+            y += alto_cartao
 
         if mostra_texto:
             apagada = api.foi_apagada(msg)
             doc = documento(texto, larg - self.PAD * 2, ESCALA.px(),
                             P["fraco"] if apagada else P["texto"], apagada)
+            alvo["texto"] = (QPoint(caixa.left() + self.PAD, y) - origem, doc)
             p.save()
             p.translate(caixa.left() + self.PAD, y)
             doc.drawContents(p)
@@ -2587,19 +2657,19 @@ class MiniPlayer(QWidget):
         self.audio = audio
         self.setVisible(False)
         self.b_play = QPushButton("⏸")
-        self.b_play.setFixedWidth(34)
+        fixo(self.b_play, 34)
         self.b_play.clicked.connect(
             lambda: audio.alternar(audio.mid, "", "") if audio.mid else None
         )
         self.rotulo = QLabel("")
         self.barra = QProgressBar()
         self.barra.setTextVisible(False)
-        self.barra.setFixedHeight(4)
+        fixo(self.barra, alt=4)
         self.b_vel = QPushButton("1×")
-        self.b_vel.setFixedWidth(34)
+        fixo(self.b_vel, 34)
         self.b_vel.clicked.connect(audio.trocar_velocidade)
         fechar = QPushButton("✕")
-        fechar.setFixedWidth(28)
+        fixo(fechar, 28)
         fechar.clicked.connect(audio.parar)
 
         linha = QHBoxLayout()
@@ -2792,18 +2862,18 @@ class BarraGravacao(QWidget):
         self.gravador = gravador
         self.picos: deque = deque(maxlen=200)
         lixo = QPushButton("🗑")
-        lixo.setFixedWidth(40)
+        fixo(lixo, 40)
         lixo.setToolTip("Cancelar — o áudio é descartado")
         lixo.clicked.connect(self.cancelar)
         self.ponto = QLabel("●")
         self.tempo = QLabel("0:00")
         self.onda = _OndaAoVivo(self.picos)
         self.b_pausa = QPushButton("⏸")
-        self.b_pausa.setFixedWidth(40)
+        fixo(self.b_pausa, 40)
         self.b_pausa.setToolTip("Pausar gravação")
         self.b_pausa.clicked.connect(self._pausa)
         envia = QPushButton("➤")
-        envia.setFixedWidth(40)
+        fixo(envia, 40)
         envia.setToolTip("Enviar áudio")
         envia.clicked.connect(self.enviar)
         linha = QHBoxLayout(self)
@@ -3054,7 +3124,7 @@ class PlayerMidia(QWidget):
         self.player.setVideoOutput(self.tela)
 
         self.play = QPushButton("⏸")
-        self.play.setFixedWidth(40)
+        fixo(self.play, 40)
         self.play.clicked.connect(self.alternar)
 
         self.barra = QSlider(Qt.Horizontal)
@@ -3063,7 +3133,7 @@ class PlayerMidia(QWidget):
         self.tempo.setStyleSheet("background:transparent;")
 
         self.volume = QSlider(Qt.Horizontal)
-        self.volume.setFixedWidth(90)
+        fixo(self.volume, 90)
         self.volume.setRange(0, 100)
         self.volume.setValue(90)
         self.volume.valueChanged.connect(lambda v: self.saida.setVolume(v / 100))
@@ -3156,19 +3226,19 @@ class Visualizador(QDialog):
         baixar.setToolTip("Salvar em Downloads")
         baixar.clicked.connect(self.salvar)
         self.favoritar = QPushButton("☆")
-        self.favoritar.setFixedWidth(30)
+        fixo(self.favoritar, 30)
         self.favoritar.setToolTip("Favoritar")
         self.favoritar.clicked.connect(lambda: self._disparar("☆", "★"))
         self.copiar = QPushButton("⧉")
-        self.copiar.setFixedWidth(30)
+        fixo(self.copiar, 30)
         self.copiar.setToolTip("Copiar imagem")
         self.copiar.clicked.connect(self._copiar)
         self.encaminhar = QPushButton("➦")
-        self.encaminhar.setFixedWidth(30)
+        fixo(self.encaminhar, 30)
         self.encaminhar.setToolTip("Encaminhar")
         self.encaminhar.clicked.connect(lambda: self._disparar("➦"))
         self.mais = QPushButton("⋮")
-        self.mais.setFixedWidth(30)
+        fixo(self.mais, 30)
         self.mais.setToolTip("Mais ações")
         self.mais.clicked.connect(
             lambda: self._menu(self.mais.mapToGlobal(self.mais.rect().bottomLeft()))
@@ -3180,7 +3250,7 @@ class Visualizador(QDialog):
         topo.addWidget(self.cabecalho, 1)
         for emoji in REACOES:
             b = QPushButton(emoji)
-            b.setFixedWidth(38)
+            fixo(b, 38)
             b.setToolTip(f"Reagir com {emoji}")
             b.clicked.connect(lambda _=False, e=emoji: self._reagir(e))
             topo.addWidget(b)
@@ -3198,10 +3268,10 @@ class Visualizador(QDialog):
         self.palco.addWidget(self.player)
 
         self.anterior = QPushButton("‹")
-        self.anterior.setFixedWidth(46)
+        fixo(self.anterior, 46)
         self.anterior.clicked.connect(lambda: self.ir(-1))
         self.proximo = QPushButton("›")
-        self.proximo.setFixedWidth(46)
+        fixo(self.proximo, 46)
         self.proximo.clicked.connect(lambda: self.ir(1))
         for b in (self.anterior, self.proximo):
             b.setStyleSheet("font-size:30px; background:transparent;")
@@ -3455,7 +3525,7 @@ class DialogoEnvio(QDialog):
         self.botoes_cor = []
         for cor in CORES_CANETA:
             b = QPushButton()
-            b.setFixedSize(24, 24)
+            fixo(b, 24, 24)
             b.setStyleSheet(
                 f"background:{cor}; border-radius:12px; border:2px solid {P['divisor']};"
             )
@@ -3473,7 +3543,7 @@ class DialogoEnvio(QDialog):
 
         self.tiras = QListWidget()
         self.tiras.setFlow(QListWidget.LeftToRight)
-        self.tiras.setFixedHeight(74)
+        fixo(self.tiras, alt=74)
         self.tiras.setIconSize(QSize(56, 56))
         for c in caminhos:
             item = QListWidgetItem(QIcon(str(c)) if self._e_imagem(c) else QIcon(), c.name[:14])
@@ -3842,7 +3912,7 @@ class PainelMidias(QDialog):
         linha = QHBoxLayout(c)
         linha.setContentsMargins(10, 8, 10, 8)
         icone = QLabel(ext)
-        icone.setFixedSize(34, 40)
+        fixo(icone, 34, 40)
         icone.setAlignment(Qt.AlignCenter)
         icone.setStyleSheet(
             f"background:{cor_doc(nome)}; color:#ffffff; "
@@ -3949,7 +4019,11 @@ class DadosDoContato(QDialog):
         self.titulo.setStyleSheet("font-size:20px; font-weight:600; background:transparent;")
         corpo.addWidget(self.titulo)
 
-        sub = QLabel("grupo" if self.e_grupo else api.formatar_numero(self.jids[-1]))
+        # o número sai do jid de telefone (ou do mapa @lid): com a fusão o @lid
+        # podia ser o último da lista, e o subtítulo virava "Contato"
+        fone = next((j for j in self.jids if j.endswith("@s.whatsapp.net")), "") or next(
+            (api.LIDS[j] for j in self.jids if j in api.LIDS), self.jids[-1])
+        sub = QLabel("grupo" if self.e_grupo else api.formatar_numero(fone))
         sub.setAlignment(Qt.AlignCenter)
         sub.setStyleSheet(f"color:{P['fraco']}; background:transparent;")
         corpo.addWidget(sub)
@@ -3961,7 +4035,7 @@ class DadosDoContato(QDialog):
             ("🔍", "Pesquisar", self.pesquisar),
         ]:
             b = QPushButton(f"{icone}\n{rotulo}")
-            b.setFixedSize(74, 58)
+            fixo(b, 74, 58)
             b.setStyleSheet(
                 f"background:{P['selecao']}; border-radius:10px; font-size:12px;"
             )
@@ -3988,7 +4062,7 @@ class DadosDoContato(QDialog):
         corpo.addWidget(self.linha_midia)
         self.tira = QListWidget()
         self.tira.setFlow(QListWidget.LeftToRight)
-        self.tira.setFixedHeight(96)
+        fixo(self.tira, alt=96)
         self.tira.setIconSize(QSize(80, 80))
         self.tira.setStyleSheet("background:transparent; border:none;")
         self.tira.itemClicked.connect(self._abrir_midia)
@@ -4005,7 +4079,7 @@ class DadosDoContato(QDialog):
         rot.setStyleSheet("background:transparent;")
         linha_mudo.addWidget(rot, 1)
         self.b_mudo = QPushButton()
-        self.b_mudo.setFixedWidth(120)
+        fixo(self.b_mudo, 120)
         self.b_mudo.clicked.connect(self.alternar_mudo)
         menu = QMenu(self.b_mudo)
         for rotulo, segundos in api.DURACOES_MUDO:
@@ -4379,7 +4453,7 @@ class DadosDoContato(QDialog):
     def _pintar_mudo(self):
         fim = self.j.mudos.get(self.jid)
         if not api.esta_mudo(self.j.mudos, self.jid):
-            self.b_mudo.setText("Ativado")
+            self.b_mudo.setText("Desativado")  # o rótulo é "Silenciar": não está
         elif fim == 0:
             self.b_mudo.setText("🔕 Sempre")
         else:
@@ -5043,6 +5117,51 @@ def _tile_textura() -> QPixmap:
     return _TEXTURA_CACHE[chave]
 
 
+class FaixaRolavel(QScrollArea):
+    """Abas que não cabem rolam de lado (roda do mouse incluída) em vez de
+    serem cortadas — em tiling a lista fica estreita o tempo todo, e com zoom
+    "Não lidas" virava "io lidas"."""
+
+    def __init__(self, layout):
+        super().__init__()
+        corpo = QWidget()
+        corpo.setLayout(layout)
+        self.setWidget(corpo)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+
+    def sizeHint(self):
+        return QSize(super().sizeHint().width(), self.widget().sizeHint().height())
+
+    def minimumSizeHint(self):
+        return QSize(0, self.widget().sizeHint().height())
+
+    def wheelEvent(self, e):
+        barra = self.horizontalScrollBar()
+        barra.setValue(barra.value() - (e.angleDelta().y() or e.angleDelta().x()))
+
+
+class _Alca(QSplitterHandle):
+    def mouseDoubleClickEvent(self, _):
+        self.splitter().duplo.emit()
+
+
+class Divisor(QSplitter):
+    """Separador lista | conversa pensado para tiling WM, onde a janela muda
+    de tamanho o tempo todo: alça larga com realce no hover (era 1px), a
+    lista mantém a largura e a conversa absorve o resto, a largura escolhida
+    é lembrada, e duplo clique na alça volta ao padrão."""
+
+    duplo = Signal()
+
+    def createHandle(self):
+        return _Alca(self.orientation(), self)
+
+
 class Conversa(QListView):
     """A conversa com papel de parede texturizado — as bolhas rolam por cima
     do tile FIXO, como no Web (o padrão não acompanha o scroll)."""
@@ -5250,37 +5369,46 @@ class Janela(QMainWindow):
         self._gravador: Gravador | None = None
         self._barra_gravacao: BarraGravacao | None = None
         self._ptt_jid = ""
-        anexar = QPushButton("📎")
-        anexar.setFixedWidth(40)
-        anexar.setToolTip("Anexar")
-        menu_anexo = QMenu(anexar)
+        # Desenho do Web: [+] [ 😊 campo ] [🎤↔➤]. Eram quatro botões soltos
+        # (📎 📷 😊 GIF) de larguras diferentes, alinhados por baixo — cada
+        # glifo num tamanho, e o campo espremido em janela estreita.
+        self.b_mais = QPushButton("+")
+        self.b_mais.setObjectName("b_mais")
+        fixo(self.b_mais, 40)
+        self.b_mais.setToolTip("Anexar")
+        menu_anexo = QMenu(self.b_mais)
         menu_anexo.addAction("📄  Arquivo ou imagem").triggered.connect(self.escolher_arquivo)
+        menu_anexo.addAction("📷  Câmera").triggered.connect(self.abrir_camera)
+        menu_anexo.addAction("🎞  GIF").triggered.connect(self.abrir_gif)
         menu_anexo.addAction("🏷  Figurinha").triggered.connect(self.enviar_sticker)
         menu_anexo.addAction("📍  Localização").triggered.connect(self.enviar_local)
         menu_anexo.addAction("👤  Contato").triggered.connect(self.enviar_contato)
-        anexar.setMenu(menu_anexo)
+        self.b_mais.setMenu(menu_anexo)
 
+        # 🎤 com o campo vazio, ➤ com texto — o mesmo botão, como no Web
         self.b_mic = QPushButton("🎤")
-        self.b_mic.setFixedWidth(40)
+        fixo(self.b_mic, 40)
         self.b_mic.setToolTip("Gravar áudio")
-        self.b_mic.clicked.connect(self.alternar_ptt)
-
-        self.b_cam = QPushButton("📷")
-        self.b_cam.setFixedWidth(40)
-        self.b_cam.setToolTip("Câmera: foto, vídeo ou vídeo-recado")
-        self.b_cam.clicked.connect(self.abrir_camera)
+        self.b_mic.clicked.connect(self._mic_ou_enviar)
+        self.campo.textChanged.connect(self._trocar_mic_enviar)
 
         self.b_emoji = QPushButton("😊")
-        self.b_emoji.setFixedWidth(40)
+        fixo(self.b_emoji, 34)
         self.b_emoji.setToolTip("Emojis")
         self.b_emoji.clicked.connect(self.abrir_emoji)
         self._pop_emoji: SeletorEmoji | None = None
-
-        self.b_gif = QPushButton("GIF")
-        self.b_gif.setFixedWidth(44)
-        self.b_gif.setToolTip("Enviar GIF (Giphy)")
-        self.b_gif.clicked.connect(self.abrir_gif)
         self._pop_gif: SeletorGif | None = None
+
+        # o 😊 mora DENTRO da pílula do campo
+        self.pilula = QFrame()
+        self.pilula.setObjectName("pilula")
+        dentro = QHBoxLayout(self.pilula)
+        # +4 em cima: a margem do documento do QTextEdit, além do padding
+        dentro.setContentsMargins(ESCALA.e(4), ESCALA.e(4), 0, 0)
+        dentro.setSpacing(0)
+        dentro.addWidget(self.b_emoji, 0, Qt.AlignTop)
+        self._alinhar_emoji()
+        dentro.addWidget(self.campo, 1)
 
         # Config global mora no menu do usuário (faixa da sidebar) — spec 2.0
 
@@ -5290,7 +5418,7 @@ class Janela(QMainWindow):
             f"padding:6px 8px; border-radius:4px;"
         )
         fechar_resp = QPushButton("✕")
-        fechar_resp.setFixedWidth(30)
+        fixo(fechar_resp, 30)
         fechar_resp.clicked.connect(self.cancelar_resposta)
         linha_resp = QHBoxLayout()
         linha_resp.setContentsMargins(10, 6, 10, 0)
@@ -5303,15 +5431,12 @@ class Janela(QMainWindow):
         rodape = QHBoxLayout()
         rodape.setContentsMargins(10, 8, 10, 10)
         rodape.setSpacing(6)
-        rodape.addWidget(anexar, 0, Qt.AlignBottom)
-        rodape.addWidget(self.b_cam, 0, Qt.AlignBottom)
-        rodape.addWidget(self.b_emoji, 0, Qt.AlignBottom)
-        rodape.addWidget(self.b_gif, 0, Qt.AlignBottom)
-        rodape.addWidget(self.campo)
+        rodape.addWidget(self.b_mais, 0, Qt.AlignBottom)
+        rodape.addWidget(self.pilula, 1)
         rodape.addWidget(self.b_mic, 0, Qt.AlignBottom)
         self._rodape = rodape
         # o que some enquanto a gravação ocupa o lugar do campo de texto
-        self._compondo = [anexar, self.b_cam, self.b_emoji, self.b_gif, self.campo, self.b_mic]
+        self._compondo = [self.b_mais, self.pilula, self.b_mic]
 
         direita = QVBoxLayout()
         direita.setContentsMargins(0, 0, 0, 0)
@@ -5333,17 +5458,25 @@ class Janela(QMainWindow):
 
         self.btn_busca = QPushButton("🔍")
         self.btn_busca.setObjectName("btn_busca")
-        self.btn_busca.setFixedSize(36, 36)
+        fixo(self.btn_busca, 36, 36)
         self.btn_busca.setToolTip("Pesquisar nesta conversa (Ctrl+Shift+F)")
         self.btn_busca.clicked.connect(self.abrir_busca_na_conversa)
         self.btn_menu = QPushButton("⋮")
         self.btn_menu.setObjectName("btn_menu")
-        self.btn_menu.setFixedSize(36, 36)
+        fixo(self.btn_menu, 36, 36)
         self.btn_menu.setToolTip("Menu da conversa")
         self.btn_menu.clicked.connect(self.mostrar_menu_conversa)
 
+        self.b_voltar = QPushButton("‹")
+        self.b_voltar.setObjectName("btn_menu")
+        fixo(self.b_voltar, 28, 36)
+        self.b_voltar.setToolTip("Voltar para a lista (Esc)")
+        self.b_voltar.clicked.connect(self._fechar_conversa)
+        self.b_voltar.hide()
+
         cabecalho = QHBoxLayout()
         cabecalho.setSpacing(ESCALA.e(12))
+        cabecalho.addWidget(self.b_voltar, 0, Qt.AlignVCenter)
         cabecalho.addWidget(self.avatar_topo, 0, Qt.AlignVCenter)
         cabecalho.addWidget(self.zona_nome, 1)
         cabecalho.addWidget(self.btn_busca, 0, Qt.AlignVCenter)
@@ -5380,13 +5513,13 @@ class Janela(QMainWindow):
         self.contador_achados = QLabel("")
         self.contador_achados.setStyleSheet(f"color:{P['fraco']}; background:transparent;")
         b_ant = QPushButton("↑")
-        b_ant.setFixedWidth(30)
+        fixo(b_ant, 30)
         b_ant.clicked.connect(lambda: self.navegar_achado(-1))
         b_prox = QPushButton("↓")
-        b_prox.setFixedWidth(30)
+        fixo(b_prox, 30)
         b_prox.clicked.connect(lambda: self.navegar_achado(1))
         b_fecha = QPushButton("✕")
-        b_fecha.setFixedWidth(30)
+        fixo(b_fecha, 30)
         b_fecha.clicked.connect(self.fechar_busca_na_conversa)
         linha_busca = QHBoxLayout()
         linha_busca.setContentsMargins(10, 6, 10, 6)
@@ -5444,7 +5577,8 @@ class Janela(QMainWindow):
         corpo_esq.setContentsMargins(0, 8, 0, 0)
         corpo_esq.setSpacing(6)
         corpo_esq.addWidget(self.busca)
-        corpo_esq.addLayout(self.abas)
+        self.faixa_abas = FaixaRolavel(self.abas)
+        corpo_esq.addWidget(self.faixa_abas)
         corpo_esq.addWidget(self.resultados)
         corpo_esq.addWidget(self.lista, 1)
         self.mini = MiniPlayer(self.audio)
@@ -5453,11 +5587,22 @@ class Janela(QMainWindow):
         painel_esq = QWidget()
         painel_esq.setLayout(esquerda)
 
-        div = QSplitter()
+        self.painel_esq = painel_esq
+        self._lista_recolhida = False
+        painel_esq.setMinimumWidth(ESCALA.e(240))
+        div = self.divisor = Divisor()
         div.addWidget(painel_esq)
         div.addWidget(self.stack_direita)
-        div.setSizes([340, 760])
-        div.setHandleWidth(1)
+        div.setHandleWidth(ESCALA.e(7))
+        div.setChildrenCollapsible(False)  # arrastar demais não some com a lista
+        div.setStretchFactor(0, 0)  # o tiling redimensiona: a conversa absorve
+        div.setStretchFactor(1, 1)
+        div.setSizes([int(self.cfg.get("lista_px") or ESCALA.e(380)), 10_000])
+        self._guardar_divisor = QTimer(self)
+        self._guardar_divisor.setSingleShot(True)
+        self._guardar_divisor.timeout.connect(self._salvar_divisor)
+        div.splitterMoved.connect(lambda *_: self._guardar_divisor.start(600))
+        div.duplo.connect(lambda: div.setSizes([ESCALA.e(380), 10_000]))
         self.setCentralWidget(div)
         self.statusBar().showMessage("carregando…")
 
@@ -5516,6 +5661,7 @@ class Janela(QMainWindow):
             ("Ctrl+-", lambda: self.zoom(-1)),
             ("Ctrl+0", lambda: self.zoom(0)),
             ("Esc", self.sair_da_conversa),
+            ("Ctrl+Alt+B", self.alternar_lista),         # recolhe/mostra a lista
         ]:
             QShortcut(QKeySequence(combo), self, activated=acao)
 
@@ -5545,7 +5691,9 @@ class Janela(QMainWindow):
         avatar.cache_clear()
         QApplication.instance().setStyleSheet(tema_css())
         self.avatar_topo.setFixedSize(ESCALA.e(40), ESCALA.e(40))
+        reaplicar_fixos()
         self._reestilizar()
+        self._alinhar_emoji()
         self.lista.reset()
         self.conversa.reset()
         self.statusBar().showMessage(f"escala: {ESCALA.px()}px")
@@ -5554,6 +5702,33 @@ class Janela(QMainWindow):
         # No POOL, dois zooms seguidos viravam dois escritores concorrentes no
         # mesmo arquivo, e sair no meio perdia a gravacao.
         api.salvar_config(dict(self.cfg))
+
+    LIMIAR_ESTREITO = 760  # px na escala base; abaixo disso, um painel por vez
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._ajustar_modo()
+
+    def _ajustar_modo(self):
+        """Estreito (tiling apertado): lista OU conversa, voltar com ‹ ou Esc —
+        como o Web estreito e o celular. Largo: os dois lado a lado."""
+        if not hasattr(self, "divisor"):
+            return
+        estreito = self.width() < ESCALA.e(self.LIMIAR_ESTREITO)
+        aberta = bool(self.msgs.jids)
+        self.painel_esq.setVisible(not (estreito and aberta) and not (
+            not estreito and self._lista_recolhida))
+        self.stack_direita.setVisible(not estreito or aberta)
+        self.b_voltar.setVisible(estreito and aberta)
+
+    def alternar_lista(self):
+        self._lista_recolhida = not self._lista_recolhida
+        self._ajustar_modo()
+
+    def _salvar_divisor(self):
+        if self.painel_esq.isVisible() and self.stack_direita.isVisible():
+            self.cfg["lista_px"] = self.divisor.sizes()[0]
+            api.salvar_config(dict(self.cfg))
 
     def sair_da_conversa(self):
         """Esc: fecha a busca se estiver aberta; senão volta ao repouso."""
@@ -5569,9 +5744,13 @@ class Janela(QMainWindow):
         if not self.msgs.jid:
             self.lista.setFocus()
             return
+        self._fechar_conversa()
+
+    def _fechar_conversa(self):
         self._guardar_no_cache()
         self.msgs.abrir("", [], 1)
         self.msgs.jids = []
+        QTimer.singleShot(0, self._ajustar_modo)  # estreito: volta para a lista
         self.titulo.setText("Selecione uma conversa")
         self.subtitulo.setText("")
         self.avatar_topo.clear()
@@ -5585,6 +5764,7 @@ class Janela(QMainWindow):
     def trocar_filtro(self, chave: str):
         self.filtro = chave
         self.aplicar_filtros()
+        self.faixa_abas.ensureWidgetVisible(self.botoes_filtro[chave])
 
     def _passa(self, chat: dict) -> bool:
         jids = chat.get("_jids") or [chat.get("remoteJid")]
@@ -5641,6 +5821,9 @@ class Janela(QMainWindow):
                               ("arquivadas", "🗄  Arquivadas")]:
             n = contagens[chave]
             self.botoes_filtro[chave].setText(f"{rotulo} {n}" if n and chave != "tudo" else rotulo)
+        # o título é o que a barra do WM (waybar & cia) mostra
+        n = contagens["naolidas"]
+        self.setWindowTitle(f"({n}) zap-evo" if n else "zap-evo")
 
     def filtrar(self, termo: str):
         self.aplicar_filtros()
@@ -6119,6 +6302,7 @@ class Janela(QMainWindow):
         # unreadCount da linha (conversa já "aberta") e matava a âncora
         self._naolidas_ao_abrir = int(chat.get("unreadCount") or 0)
         self.msgs.jids = chat.get("_jids") or [jid]
+        self._ajustar_modo()  # estreito: a conversa toma o lugar da lista
         nome = api.nome_do_chat(chat, self.chats.contatos)
         self.titulo.setText(nome)
         self._barra_da_conversa()
@@ -6687,6 +6871,9 @@ class Janela(QMainWindow):
                     return True
                 if not api.foi_apagada(msg) and self._clique_citacao(ix, ponto, msg):
                     return True
+                if not api.foi_apagada(msg) and (url := self._link_sob(ix, ponto, msg)):
+                    QDesktopServices.openUrl(QUrl(url))
+                    return True
                 if msg.get("messageType") == "audioMessage" and not api.foi_apagada(msg):
                     if self._clique_audio(ix, ponto, msg):
                         return True
@@ -6694,10 +6881,25 @@ class Janela(QMainWindow):
                 # cair EM CIMA dela. Fora disso o clique morre aqui, como no Web.
                 if not api.foi_apagada(msg) and self._clique_midia(ix, ponto, msg):
                     return True
+        if obj is self.conversa.viewport() and ev.type() == QEvent.MouseMove:
+            # mãozinha sobre link, como em qualquer lugar clicável da web
+            ponto = ev.position().toPoint()
+            ix = self.conversa.indexAt(ponto)
+            sobre = ix.isValid() and self._link_sob(ix, ponto, item_de(ix) or {})
+            vp = self.conversa.viewport()
+            if sobre:
+                vp.setCursor(Qt.PointingHandCursor)
+            elif vp.cursor().shape() == Qt.PointingHandCursor:
+                vp.unsetCursor()
         if obj is self.conversa.viewport() and ev.type() == QEvent.Resize:
             if getattr(self, "botao_descer", None) and self.botao_descer.isVisible():
                 self._mostrar_botao_descer()
         return super().eventFilter(obj, ev)
+
+    def _link_sob(self, ix, ponto, msg) -> str:
+        """Link (no texto ou no cartão de prévia) sob o ponto. Antes nenhum
+        clique em link fazia nada: o texto saía azul e era só tinta."""
+        return self.conversa.itemDelegate().link_em(self.conversa.visualRect(ix), msg, ponto)
 
     def _clique_local(self, ix, ponto, msg) -> bool:
         """Cartão de localização clicável: abre o ponto no Google Maps (sem
@@ -7009,7 +7211,7 @@ class Janela(QMainWindow):
         self.campo.setPlaceholderText(
             motivo if travado else "Escreva uma mensagem — Ctrl+V cola arquivo"
         )
-        for w in (self.b_mic, self.b_cam, self.b_emoji, self.b_gif):
+        for w in (self.b_mic, self.b_mais, self.b_emoji):
             w.setEnabled(not travado)
         self.campo.setStyleSheet(
             f"background:{P['painel']}; color:{P['fraco']}; border:1px solid {P['divisor']};"
@@ -7150,12 +7352,30 @@ class Janela(QMainWindow):
             self._barra_gravacao = BarraGravacao(self.gravador, self)
             self._barra_gravacao.cancelar.connect(self._cancelar_gravacao)
             self._barra_gravacao.enviar.connect(self._enviar_gravacao)
-            self._rodape.insertWidget(self._rodape.indexOf(self.campo), self._barra_gravacao, 1)
+            self._rodape.insertWidget(self._rodape.indexOf(self.pilula), self._barra_gravacao, 1)
         for w in self._compondo:
             w.hide()
         self._barra_gravacao.comecar()
         self._barra_gravacao.show()
         POOL.submit(self.api.presenca, self._ptt_jid, "recording", 60_000)
+
+    def _alinhar_emoji(self):
+        """O 😊 tem a altura da primeira linha do campo (texto + padding de
+        cima e de baixo) e fica no topo: centrado no texto, onde ele está."""
+        self.b_emoji.setFixedHeight(
+            QFontMetrics(self.campo.font()).lineSpacing() + ESCALA.e(16))
+
+    def _trocar_mic_enviar(self):
+        com_texto = bool(self.campo.toPlainText().strip())
+        self.b_mic.setText("➤" if com_texto else "🎤")
+        self.b_mic.setToolTip("Enviar" if com_texto else "Gravar áudio")
+
+    def _mic_ou_enviar(self):
+        if texto := self.campo.toPlainText().strip():
+            self.campo.clear()
+            self.enviar_texto(texto)
+        else:
+            self.alternar_ptt()
 
     def _enviar_gravacao(self):
         self.gravador.parar()  # o arquivo chega por `pronto` -> _ptt_pronto
@@ -7751,6 +7971,11 @@ class Janela(QMainWindow):
             self._buscar_midia(msg)
 
         self.registrar_atividade(jid, msg)
+        if not (msg.get("key") or {}).get("fromMe") and not api.esta_mudo(self.mudos, jid) \
+                and not self.isActiveWindow():
+            # janela em segundo plano: pede atenção ao WM (no Hyprland a janela
+            # e o workspace ficam "urgentes") — independe da notificação
+            QApplication.alert(self)
         if not (msg.get("key") or {}).get("fromMe") and not aberta:
             if self.cfg.get("notificar") and not api.esta_mudo(self.mudos, jid):
                 remetente = (msg.get("pushName") or "").strip() or api.formatar_numero(jid)
@@ -7764,6 +7989,12 @@ def main():
     )
     cfg = api.load_config()
     app = QApplication(sys.argv)
+    # botões padrão do Qt (Salvar/Cancelar, Sim/Não das confirmações) em
+    # pt-BR: sem o tradutor do próprio Qt eles saíam em inglês
+    tradutor = QTranslator(app)
+    if tradutor.load(QLocale("pt_BR"), "qtbase", "_",
+                     QLibraryInfo.path(QLibraryInfo.TranslationsPath)):
+        app.installTranslator(tradutor)
     app.setApplicationName("zap-evo")
     app.setApplicationDisplayName("zap-evo")
     # no Wayland é isto que liga a janela ao .desktop — sem ele o compositor

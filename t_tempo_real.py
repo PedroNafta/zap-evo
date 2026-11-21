@@ -28,6 +28,8 @@ import tempfile  # noqa: E402
 api.CACHE = pathlib.Path(tempfile.mkdtemp(prefix="t_tempo_real_"))  # nada no ~/.cache real
 main.ANIMA = main.Animador()
 cfg = dict(api.load_config(), host="http://127.0.0.1:9", notificar=False)
+gravados = []
+api.salvar_config = gravados.append  # zoom/divisor gravam o config: nunca o real
 j = main.Janela(cfg)
 FONE, LID = "5581999990000@s.whatsapp.net", "99999999999@lid"
 ok = 0
@@ -325,7 +327,7 @@ j._tentar = lambda fn, *a: fn(*a)
 
 j.alternar_ptt()
 barra = j._barra_gravacao
-assert not barra.isHidden() and j.campo.isHidden() and j.b_mic.isHidden(), "campo não virou gravação"
+assert not barra.isHidden() and j.pilula.isHidden() and j.b_mic.isHidden(), "campo não virou gravação"
 assert barra.tempo.text() == "0:07"
 for v in (0.1, 0.8, 0.3):
     g.nivel.emit(v)
@@ -337,7 +339,7 @@ assert len(barra.picos) == 3, "pausado, a onda não anda"
 barra.b_pausa.click()
 assert not g.pausado() and barra.b_pausa.text() == "⏸"
 barra.cancelar.emit()
-assert g.log[-1] == "cancelar" and not j.campo.isHidden() and barra.isHidden()
+assert g.log[-1] == "cancelar" and not j.pilula.isHidden() and barra.isHidden()
 g.pronto.emit(pathlib.Path("/tmp/x.wav"))
 QTest.qWait(50)
 assert not enviados, "cancelado não pode enviar"
@@ -356,9 +358,93 @@ while not enviados and time.time() < prazo:
     QApplication.processEvents()
     time.sleep(0.01)
 assert enviados and enviados[0][0] == FONE, f"áudio foi para {enviados}"
-assert not j.campo.isHidden() and barra.isHidden()
+assert not j.pilula.isHidden() and barra.isHidden()
 ok += 1
 print("ok  gravação no lugar do campo: onda, ⏸↔🎤, 🗑 descarta, ➤ vai para quem começou")
 
-print(f"\n{ok}/18 passaram")
+# ---------- link na bolha abre (antes era só tinta azul)
+abertas = []
+main.QDesktopServices = type("D", (), {"openUrl": staticmethod(lambda u: abertas.append(u.toString()))})
+txt = {"key": {"id": "l1", "fromMe": False, "remoteJid": FONE}, "messageType": "conversation",
+       "messageTimestamp": 1795000700, "message": {"conversation": "olha www.exemplo.com/x."}}
+j.stack_direita.setCurrentIndex(0)
+j.stack_direita.show()
+j.msgs.abrir(FONE, [txt], 1)
+j.msgs.jids = [FONE]
+QTest.qWait(150)
+ix = j.msgs.index(0)
+rect = j.conversa.visualRect(ix)
+deleg = j.conversa.itemDelegate()
+canto, doc = deleg.links["l1"]["texto"]
+alvo_link = next((rect.topLeft() + canto + main.QPoint(x, y)
+                  for y in range(2, int(doc.size().height()), 3)
+                  for x in range(0, int(doc.size().width()), 3)
+                  if deleg.link_em(rect, txt, rect.topLeft() + canto + main.QPoint(x, y))), None)
+assert alvo_link, "nenhum ponto do texto é link"
+ev = QMouseEvent(QEvent.MouseButtonPress, QPointF(alvo_link), QPointF(alvo_link),
+                 main.Qt.LeftButton, main.Qt.LeftButton, main.Qt.NoModifier)
+assert j.eventFilter(j.conversa.viewport(), ev)
+assert abertas == ["https://www.exemplo.com/x"], abertas
+fora = rect.topLeft() + canto + main.QPoint(2, 2)  # "olha": texto, não link
+assert not deleg.link_em(rect, txt, fora)
+ok += 1
+print("ok  link na bolha abre no navegador (www sem esquema, ponto final fora)")
+
+# ---------- Ctrl +/- escala a interface inteira, não só a fonte
+base = j.b_mais.width()
+linha_base = j.lista.itemDelegate().ALTURA
+j.zoom(+4)
+assert j.b_mais.width() > base and j.b_mais.width() == main.ESCALA.e(40), "botão não escalou"
+assert j.lista.itemDelegate().ALTURA > linha_base, "linha da lista não escalou"
+j.zoom(0)
+assert j.b_mais.width() == base
+ok += 1
+print("ok  Ctrl +/- escala botões e a linha da lista, não só a fonte")
+
+# ---------- 🎤 vira ➤ com texto
+falados = []
+j.enviar_texto = falados.append
+j.campo.setPlainText("oi")
+assert j.b_mic.text() == "➤"
+j.b_mic.click()
+assert falados == ["oi"] and not j.campo.toPlainText() and j.b_mic.text() == "🎤"
+ok += 1
+print("ok  o botão da direita é ➤ com texto e 🎤 com o campo vazio")
+
+# ---------- tiling: janela estreita mostra um painel por vez
+j.msgs.jids = [FONE]
+j.resize(600, 700)
+QTest.qWait(50)
+assert j.painel_esq.isHidden() and not j.stack_direita.isHidden() and not j.b_voltar.isHidden()
+j.b_voltar.click()
+QTest.qWait(50)
+assert not j.painel_esq.isHidden() and j.stack_direita.isHidden(), "‹ não voltou para a lista"
+j.resize(1200, 700)
+QTest.qWait(50)
+assert not j.painel_esq.isHidden() and not j.stack_direita.isHidden() and j.b_voltar.isHidden()
+j.alternar_lista()
+assert j.painel_esq.isHidden()
+j.alternar_lista()
+j.divisor.setSizes([333, 800])
+j._salvar_divisor()
+assert gravados and gravados[-1]["lista_px"] == j.divisor.sizes()[0]
+ok += 1
+print("ok  tiling: um painel por vez no estreito, ‹ volta, lista recolhe, largura lembrada")
+
+# ---------- janela em segundo plano pede atenção ao WM; título leva as não lidas
+alertas = []
+QApplication.alert = lambda w, ms=0: alertas.append(w)
+j.isActiveWindow = lambda: False
+chega("u1", "chegou com a janela atrás")
+assert alertas == [j], "WM não foi avisado"
+j.isActiveWindow = lambda: True
+chega("u2", "com a janela na frente")
+assert len(alertas) == 1
+j._todos = [{"remoteJid": "x@s.whatsapp.net", "unreadCount": 3}]
+j.aplicar_filtros()
+assert j.windowTitle().startswith("("), j.windowTitle()
+ok += 1
+print("ok  janela atrás: alerta de urgência ao WM; título com as não lidas")
+
+print(f"\n{ok}/23 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)
