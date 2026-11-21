@@ -28,6 +28,9 @@ import tempfile  # noqa: E402
 api.CACHE = pathlib.Path(tempfile.mkdtemp(prefix="t_tempo_real_"))  # nada no ~/.cache real
 main.ANIMA = main.Animador()
 cfg = dict(api.load_config(), host="http://127.0.0.1:9", notificar=False)
+# o pacote de ícones salvo na máquina não pode mudar o resultado do teste: o
+# padrão é emoji, e é ele que os checks de emoji assumem
+cfg["icones"] = "emoji"
 gravados = []
 api.salvar_config = gravados.append  # zoom/divisor gravam o config: nunca o real
 api.gravar_json = lambda *a, **k: None  # favoritas, arquivadas... idem
@@ -868,5 +871,14 @@ assert dlg_icones.valores()["icones"] == escolhido, dlg_icones.valores().get("ic
 ok += 1
 print("ok  a configuração oferece os 4 pacotes e grava a escolha")
 
-print(f"\n{ok}/45 passaram")
+# ---------- as marcas do rodapé são traçadas, não emoji de fonte
+for _nome, (_marca, _azul) in api.MARCAS.items():
+    if _marca:
+        assert main.marca_de_desenho(_marca), f"marca sem traço: {_marca!r}"
+assert main.largura_marca("check2", 12) > main.largura_marca("check", 12) > 0
+assert main.marca_de_desenho("lixo") == ""
+ok += 1
+print("ok  ✓ ✓✓ 🕐 ⚠ têm traço próprio; nenhuma marca cai em emoji")
+
+print(f"\n{ok}/46 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)

@@ -1037,9 +1037,12 @@ class ItemChat(QStyledItemDelegate):
         cursor = x
         limite = x + largura
         if marca:
+            nome_marca = marca_de_desenho(marca)
             p.setPen(QColor(P["citacao"] if azul_marca else P["fraco"]))
-            p.drawText(QRect(cursor, r.top() + ESCALA.e(36), ESCALA.e(26), ESCALA.e(18)), Qt.AlignLeft | Qt.AlignVCenter, marca)
-            cursor += metrica.horizontalAdvance(marca) + ESCALA.e(5)
+            area_marca = QRectF(cursor, r.top() + ESCALA.e(36), ESCALA.e(20), ESCALA.e(18))
+            desenhar_marca(p, area_marca, nome_marca,
+                           QColor(P["citacao"] if azul_marca else P["fraco"]))
+            cursor += largura_marca(nome_marca, ESCALA.e(18)) + ESCALA.e(5)
         if autor:
             rotulo = f"{autor}: "
             p.setPen(QColor(P["fraco"]))
@@ -1070,14 +1073,18 @@ class ItemChat(QStyledItemDelegate):
             p.drawText(pill, Qt.AlignCenter, rotulo)
             dx -= w + ESCALA.e(6)
         if mudo:
-            p.setFont(fonte(opt.font, -1))
-            p.setPen(QColor(P["fraco"]))
-            p.drawText(QRect(dx - ESCALA.e(20), r.top() + ESCALA.e(38), ESCALA.e(20), ESCALA.e(20)), Qt.AlignCenter, "🔕")
+            area_selo = QRectF(dx - ESCALA.e(20), r.top() + ESCALA.e(38), ESCALA.e(18), ESCALA.e(18))
+            if not pintar_icone_pacote(p, area_selo, "sino_cortado"):
+                p.setFont(fonte(opt.font, -1))
+                p.setPen(QColor(P["fraco"]))
+                p.drawText(area_selo, Qt.AlignCenter, icones.emoji("sino_cortado"))
             dx -= ESCALA.e(24)
         if fixado:
-            p.setFont(fonte(opt.font, -1))
-            p.setPen(QColor(P["fraco"]))
-            p.drawText(QRect(dx - ESCALA.e(18), r.top() + ESCALA.e(38), ESCALA.e(18), ESCALA.e(20)), Qt.AlignCenter, "📌")
+            area_pin = QRectF(dx - ESCALA.e(18), r.top() + ESCALA.e(38), ESCALA.e(18), ESCALA.e(18))
+            if not pintar_icone_pacote(p, area_pin, "pino"):
+                p.setFont(fonte(opt.font, -1))
+                p.setPen(QColor(P["fraco"]))
+                p.drawText(area_pin, Qt.AlignCenter, icones.emoji("pino"))
 
         p.setPen(QColor(P["divisor"]))
         p.drawLine(x, r.bottom(), r.right(), r.bottom())
@@ -1415,10 +1422,10 @@ class Balao(QStyledItemDelegate):
         f_rod = fonte(opt.font, -2.5)
         m_rod = QFontMetrics(f_rod)
         rotulo, marca, _azul = self._rodape_de(msg)
-        larg_rodape = m_rod.horizontalAdvance(rotulo) + ESCALA.e(8) + (
-            m_rod.horizontalAdvance(marca) + ESCALA.e(4) if marca else 0
-        )
         alt_rodape = m_rod.height()
+        larg_rodape = m_rod.horizontalAdvance(rotulo) + ESCALA.e(8) + (
+            largura_marca(marca_de_desenho(marca), alt_rodape) + ESCALA.e(4) if marca else 0
+        )
 
         larg = max(larg_txt, min(pix.width(), util) if pix else 0)
         larg_nome = 0
@@ -1618,10 +1625,11 @@ class Balao(QStyledItemDelegate):
         p.setBrush(QColor(P["accent"]))
         p.drawEllipse(selo)
         p.setPen(QColor("#ffffff"))
-        f = QFont()
-        f.setPixelSize(max(8, int(lado * 0.62)))
-        p.setFont(f)
-        p.drawText(selo, Qt.AlignCenter, "🎤")
+        if not pintar_icone_pacote(p, QRectF(selo), "microfone", px=max(10, int(lado * 0.66))):
+            f = QFont()
+            f.setPixelSize(max(8, int(lado * 0.62)))
+            p.setFont(f)
+            p.drawText(selo, Qt.AlignCenter, icones.emoji("microfone"))
 
     def link_em(self, rect: QRect, msg: dict, ponto: QPoint) -> str:
         """URL sob o ponto (coordenadas do viewport), ou "" — texto ou cartão."""
@@ -1684,9 +1692,17 @@ class Balao(QStyledItemDelegate):
         p.setPen(QColor(P["texto"]))
         p.setFont(fonte(opt.font, 2))
         # baixando / indisponível aparecem no botão (antes: texto no rodapé)
-        icone = "⏳" if msg.get("_baixando") else "⚠" if msg.get("_indisponivel") else (
-            "⏸" if tocando else "▶")
-        p.drawText(botao, Qt.AlignCenter, icone)
+        if msg.get("_baixando"):
+            slot_botao, traco = "relogio", "relogio"
+        elif msg.get("_indisponivel"):
+            slot_botao, traco = "aviso", "aviso"
+        else:
+            slot_botao, traco = ("pausar", "") if tocando else ("play", "")
+        px_botao = max(10, int(botao.height() * 0.52))
+        if traco:
+            desenhar_marca(p, QRectF(botao), traco, QColor(P["texto"]))
+        elif not pintar_icone_pacote(p, QRectF(botao), slot_botao, px=px_botao):
+            p.drawText(botao, Qt.AlignCenter, icones.emoji(slot_botao))
 
         # a onda do payload vem com a mensagem e nao depende de download; os
         # picos do ffmpeg so' entram quando ela nao veio (audio nosso, antigo)
@@ -1719,10 +1735,11 @@ class Balao(QStyledItemDelegate):
         p.setBrush(QColor(0, 0, 0, 130))
         p.drawEllipse(centro)
         p.setPen(QColor("#ffffff"))
-        f = QFont()
-        f.setPixelSize(ESCALA.e(18))
-        p.setFont(f)
-        p.drawText(centro, Qt.AlignCenter, "▶")
+        if not pintar_icone_pacote(p, QRectF(centro), "play", px=max(10, int(centro.height() * 0.62))):
+            f = QFont()
+            f.setPixelSize(ESCALA.e(18))
+            p.setFont(f)
+            p.drawText(centro, Qt.AlignCenter, icones.emoji("play"))
 
         self._selo_video(p, opt, area, det)
 
@@ -1743,7 +1760,13 @@ class Balao(QStyledItemDelegate):
         p.setBrush(QColor(0, 0, 0, 130))
         p.drawRoundedRect(pill, alt // 2, alt // 2)
         p.setPen(QColor("#ffffff"))
-        p.drawText(pill, Qt.AlignCenter, ("" if gif else "🎬 ") + rotulo)
+        if gif or pintar_icone_pacote(p, QRectF(pill), "video", px=max(10, int(alt * 0.55))):
+            p.drawText(pill, Qt.AlignCenter, rotulo)
+        else:
+            f = QFont()
+            f.setPixelSize(max(9, int(alt * 0.5)))
+            p.setFont(f)
+            p.drawText(pill, Qt.AlignCenter, f"{icones.emoji('video')} {rotulo}")
 
     def _pintar_documento(self, p, opt, caixa, y, det, meu=False):
         nome = det.get("nome", "documento")
@@ -1778,8 +1801,9 @@ class Balao(QStyledItemDelegate):
             p.drawLine(mapa.left() + i * (mapa.width() // 4), mapa.top(),
                        mapa.left() + i * (mapa.width() // 4), mapa.bottom())
         p.setPen(QColor(P["perigo"]))
-        p.setFont(fonte(opt.font, 6))
-        p.drawText(mapa, Qt.AlignCenter, "📍")
+        if not pintar_icone_pacote(p, QRectF(mapa), "mapa", px=max(10, int(mapa.height() * 0.8))):
+            p.setFont(fonte(opt.font, 6))
+            p.drawText(mapa, Qt.AlignCenter, icones.emoji("mapa"))
         p.setFont(fonte(opt.font, -1))
         p.setPen(QColor(P["texto"]))
         p.drawText(QRect(mapa.left(), mapa.bottom() + 4, mapa.width(), 16),
@@ -2028,21 +2052,22 @@ class Balao(QStyledItemDelegate):
             - (self.REACAO if msg.get("_reacoes") else 0)
         )
         rotulo, marca, azul = self._rodape_de(msg)
-        larg_marca = (m.horizontalAdvance(marca) + ESCALA.e(4)) if marca else 0
+        nome_marca = marca_de_desenho(marca)
+        larg_marca = (largura_marca(nome_marca, alt_rodape) + ESCALA.e(4)) if nome_marca else 0
         p.setPen(QColor(P["hora_minha"] if meu else P["fraco_dele"]))
         p.drawText(
             QRect(caixa.left(), base_rodape, larg - self.PAD_H - larg_marca, alt_rodape),
             Qt.AlignRight, rotulo,
         )
-        if marca:
-            # ✓✓ azul so' quando lido/ouvido — o resto acompanha a cor da hora
-            p.setPen(QColor(
-                P["citacao_bolha"] if azul else (P["hora_minha"] if meu else P["fraco_dele"])
-            ))
-            p.drawText(
-                QRect(caixa.right() - self.PAD_H - larg_marca, base_rodape,
-                      larg_marca, alt_rodape),
-                Qt.AlignRight, marca,
+        if nome_marca:
+            # ✓/✓✓/🕐 traçados: seguem a cor da hora, do lido e a escala do zoom
+            cor_marca = P["citacao_bolha"] if azul else (
+                P["hora_minha"] if meu else P["fraco_dele"])
+            desenhar_marca(
+                p,
+                QRectF(caixa.right() - self.PAD_H - larg_marca, base_rodape,
+                       larg_marca - ESCALA.e(4), alt_rodape),
+                nome_marca, QColor(cor_marca),
             )
 
         emojis, quantos = api.resumo_reacoes(msg)
@@ -2066,8 +2091,10 @@ class Balao(QStyledItemDelegate):
             p.setBrush(QColor(P["painel"]))
             p.drawEllipse(seta)
             p.setPen(QColor(P["fraco"]))
-            p.setFont(fonte(opt.font, 0))
-            p.drawText(seta, Qt.AlignCenter, "➦")
+            if not pintar_icone_pacote(p, QRectF(seta), "encaminhar",
+                                       px=max(10, int(seta.height() * 0.7))):
+                p.setFont(fonte(opt.font, 0))
+                p.drawText(seta, Qt.AlignCenter, icones.emoji("encaminhar"))
         p.restore()
 
 
@@ -2118,6 +2145,75 @@ def buscar_emojis(
     if grupo:
         return [e for e in emojis.EMOJIS if e[4] == grupo]
     return list(emojis.EMOJIS)
+
+
+# --------------------------------------------------------------------- marcas
+# O rodapé da bolha e a linha da lista sempre desenharam ✓/✓✓/🕐/⚠ como TEXTO:
+# o desenho vinha da fonte do sistema, não seguia a cor da hora, não escalava
+# com o zoom e em algumas fontes saía quadrado. Aqui os quatro são traçados.
+MARCAS_DESENHO = {"✓": "check", "✓✓": "check2", "🕐": "relogio", "⚠": "aviso"}
+_FATOR_MARCA = {"check": 1.05, "check2": 1.8, "relogio": 1.05, "aviso": 1.1}
+
+
+def marca_de_desenho(marca: str) -> str:
+    """Nome do traço para a marca do rodapé ('' quando não é marca)."""
+    return MARCAS_DESENHO.get(marca, "")
+
+
+def largura_marca(nome: str, altura: float) -> float:
+    """Largura que o traço ocupa, para caber no rodapé medido."""
+    return altura * _FATOR_MARCA.get(nome, 0.0)
+
+
+def desenhar_marca(p, area: QRectF, nome: str, cor: QColor):
+    """Traça a marca dentro de `area` (já posicionada), na cor da hora/lida."""
+    if not nome:
+        return
+    lado = min(float(area.height()), float(area.width()) / _FATOR_MARCA.get(nome, 1.0))
+    ox, oy = float(area.left()), area.top() + (area.height() - lado) / 2
+    p.save()
+    p.setBrush(Qt.NoBrush)
+    p.setPen(QPen(cor, max(1.0, lado * 0.11), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+
+    def linha(x1, y1, x2, y2):
+        p.drawLine(QPointF(ox + lado * x1, oy + lado * y1),
+                   QPointF(ox + lado * x2, oy + lado * y2))
+
+    if nome == "check":
+        linha(0.06, 0.55, 0.38, 0.86)
+        linha(0.38, 0.86, 0.94, 0.16)
+    elif nome == "check2":
+        # o de trás menor, o da frente inteiro: é assim no WhatsApp
+        linha(0.00, 0.55, 0.20, 0.78)
+        linha(0.20, 0.78, 0.52, 0.34)
+        linha(0.34, 0.55, 0.54, 0.78)
+        linha(0.54, 0.78, 1.00, 0.12)
+    elif nome == "relogio":
+        p.drawEllipse(QRectF(ox + lado * 0.07, oy + lado * 0.07, lado * 0.86, lado * 0.86))
+        linha(0.50, 0.50, 0.50, 0.24)
+        linha(0.50, 0.50, 0.70, 0.60)
+    elif nome == "aviso":
+        p.drawPolygon([QPointF(ox + lado * 0.50, oy + lado * 0.06),
+                       QPointF(ox + lado * 1.00, oy + lado * 0.92),
+                       QPointF(ox + lado * 0.00, oy + lado * 0.92)])
+        linha(0.50, 0.38, 0.50, 0.62)
+        p.drawPoint(QPointF(ox + lado * 0.50, oy + lado * 0.80))
+    p.restore()
+
+
+# pacote em uso nos desenhos do delegate; a Janela atualiza ao trocar
+PACOTE_ICONES = icones.PADRAO
+
+
+def pintar_icone_pacote(p, area: QRectF, slot: str, px: int = 0) -> bool:
+    """Desenha o ícone do pacote dentro de `area`. False quando o pacote é emoji."""
+    lado = int(px or max(10, round(min(area.width(), area.height()))))
+    desenho = icones.icone(PACOTE_ICONES, slot, lado)
+    if desenho is None:
+        return False
+    pm = desenho.pixmap(QSize(lado, lado))
+    p.drawPixmap(QPointF(area.center().x() - lado / 2, area.center().y() - lado / 2), pm)
+    return True
 
 
 class EmojiModel(QAbstractListModel):
@@ -5401,6 +5497,8 @@ class Janela(QMainWindow):
         self.cfg = dict(cfg)
         # pacote de ícones escolhido na configuração; "emoji" é o padrão de sempre
         self.pacote_icones = icones.normalizar(self.cfg.get("icones"))
+        global PACOTE_ICONES
+        PACOTE_ICONES = self.pacote_icones
         self.api = api.Api(cfg)
         self.setWindowTitle("zap-evo")
         self.resize(1100, 720)
@@ -7913,6 +8011,8 @@ class Janela(QMainWindow):
 
     def aplicar_pacote_icones(self):
         """Reaplica nos botões fixos. Menus se refazem na próxima abertura."""
+        global PACOTE_ICONES
+        PACOTE_ICONES = self.pacote_icones
         icones.limpar_cache()
         self._trocar_mic_enviar()
         if hasattr(self, "btn_busca"):
