@@ -211,7 +211,9 @@ class ChatList(QAbstractListModel):
                     return self.carregando[j]
             return None
         if role == Qt.ToolTipRole:
-            return api.text_of(c.get("lastMessage") or {})[:120]
+            # na lista em coluna (só avatares) o tooltip é o único lugar do nome
+            previa = api.text_of(c.get("lastMessage") or {})[:120]
+            return api.nome_do_chat(c, self.contatos) + (f"\n{previa}" if previa else "")
 
     def definir(self, chats: list[dict]):
         self.beginResetModel()
@@ -343,6 +345,9 @@ class Escala:
     def e(self, n: int) -> int:
         """Escala uma medida fixa (altura de linha, avatar, recuo)."""
         return max(1, round(n * self.fator()))
+
+    def porcento(self, valor: int | None = None) -> int:
+        return round((valor or self.valor) / self.BASE * 100)
 
     def mudar(self, delta: int) -> bool:
         novo = max(self.MIN, min(self.MAX, self.valor + delta))
@@ -920,6 +925,28 @@ class ItemChat(QStyledItemDelegate):
     @property
     def LADO(self): return ESCALA.e(49)
 
+    COLUNA_ATE = 160  # px na escala base: abaixo disso a linha vira só o avatar
+
+    def _pintar_coluna(self, p, opt, r, retrato, naolidas: int):
+        """Lista em coluna (como o Telegram Desktop): o avatar centrado e o
+        badge de não lidas no canto; o nome fica no tooltip."""
+        x = r.left() + (r.width() - self.LADO) // 2
+        p.drawPixmap(x, r.top() + self.PAD, retrato)
+        if not naolidas:
+            return
+        texto = str(naolidas) if naolidas < 100 else "99+"
+        f = fonte(opt.font, -2.5, negrito=True)  # o mesmo badge da lista larga
+        p.setFont(f)
+        m = QFontMetrics(f)
+        alt = m.height() + ESCALA.e(2)
+        larg = max(alt, m.horizontalAdvance(texto) + ESCALA.e(8))
+        badge = QRect(x + self.LADO - larg + ESCALA.e(4), r.top() + self.PAD - ESCALA.e(2), larg, alt)
+        p.setPen(QPen(QColor(_mix(P["badge"], P["texto"], 0.35)), 1))
+        p.setBrush(QColor(P["badge"]))
+        p.drawRoundedRect(badge, alt / 2, alt / 2)
+        p.setPen(QColor(P["sobre_badge"]))  # badge_texto é o verde do horário
+        p.drawText(badge, Qt.AlignCenter, texto)
+
     def sizeHint(self, opt, ix):
         return QSize(0, self.ALTURA)
 
@@ -945,6 +972,10 @@ class ItemChat(QStyledItemDelegate):
         retrato = foto(chat["_foto"], self.LADO) if chat.get("_foto") else QPixmap()
         if retrato.isNull():
             retrato = avatar(nome, jid, self.LADO)
+        if r.width() < ESCALA.e(self.COLUNA_ATE):
+            self._pintar_coluna(p, opt, r, retrato, naolidas)
+            p.restore()
+            return
         p.drawPixmap(r.left() + self.PAD, r.top() + self.PAD, retrato)
 
         x = r.left() + self.PAD + self.LADO + self.PAD
@@ -5026,6 +5057,12 @@ class Config(QDialog):
         i = self.tema.findData(atual)
         self.tema.setCurrentIndex(i if i >= 0 else 0)
         form.addRow("Tema", self.tema)
+        # o mesmo do Ctrl +/-, para quem prefere escolher a porcentagem
+        self.escala = QComboBox()
+        for v in range(Escala.MIN, Escala.MAX + 1):
+            self.escala.addItem(f"{ESCALA.porcento(v)}%", v)
+        self.escala.setCurrentIndex(self.escala.findData(ESCALA.valor))
+        form.addRow("Escala da interface", self.escala)
 
         aviso = QLabel(
             "Notificações vêm desligadas; conversas silenciadas nunca notificam. "
@@ -5051,6 +5088,7 @@ class Config(QDialog):
         novo["notificar"] = self.notificar.isChecked()
         novo["janela_horas"] = self.janela_h.value()
         novo["cache_gb"] = self.cache_gb.value()
+        novo["escala"] = self.escala.currentData() or ESCALA.valor
         return novo
 
 
@@ -5589,7 +5627,7 @@ class Janela(QMainWindow):
 
         self.painel_esq = painel_esq
         self._lista_recolhida = False
-        painel_esq.setMinimumWidth(ESCALA.e(240))
+        painel_esq.setMinimumWidth(ESCALA.e(self.COLUNA))
         div = self.divisor = Divisor()
         div.addWidget(painel_esq)
         div.addWidget(self.stack_direita)
@@ -5601,8 +5639,9 @@ class Janela(QMainWindow):
         self._guardar_divisor = QTimer(self)
         self._guardar_divisor.setSingleShot(True)
         self._guardar_divisor.timeout.connect(self._salvar_divisor)
-        div.splitterMoved.connect(lambda *_: self._guardar_divisor.start(600))
-        div.duplo.connect(lambda: div.setSizes([ESCALA.e(380), 10_000]))
+        div.splitterMoved.connect(lambda *_: (self._encaixar_lista(), self._guardar_divisor.start(600)))
+        div.duplo.connect(lambda: (div.setSizes([ESCALA.e(380), 10_000]), self._encaixar_lista()))
+        QTimer.singleShot(0, self._encaixar_lista)  # a largura lembrada pode ser a coluna
         self.setCentralWidget(div)
         self.statusBar().showMessage("carregando…")
 
@@ -5696,7 +5735,8 @@ class Janela(QMainWindow):
         self._alinhar_emoji()
         self.lista.reset()
         self.conversa.reset()
-        self.statusBar().showMessage(f"escala: {ESCALA.px()}px")
+        self.statusBar().showMessage(f"escala da interface: {ESCALA.porcento()}%")
+        QTimer.singleShot(0, self._encaixar_lista)  # os limiares da lista mudaram
         self.cfg["escala"] = ESCALA.valor
         # Sincrono de proposito: e' um tmp+replace de ~300 bytes, imperceptivel.
         # No POOL, dois zooms seguidos viravam dois escritores concorrentes no
@@ -5720,6 +5760,32 @@ class Janela(QMainWindow):
             not estreito and self._lista_recolhida))
         self.stack_direita.setVisible(not estreito or aberta)
         self.b_voltar.setVisible(estreito and aberta)
+
+    COLUNA, LISTA_MIN = 84, 260  # px na escala base: os dois pontos de encaixe
+
+    def _encaixar_lista(self):
+        """O separador encaixa em dois pontos, como no Telegram Desktop: abaixo
+        de ~170px vira a coluna de avatares; entre ela e a lista mínima, volta
+        para a lista mínima. Nada de lista espremida com texto cortado."""
+        if not hasattr(self, "divisor"):
+            return
+        tamanhos = self.divisor.sizes()
+        larg, total = tamanhos[0], sum(tamanhos)
+        if larg <= 0:
+            return  # lista escondida (estreito ou recolhida)
+        alvo = None
+        if larg < ESCALA.e(170):
+            alvo = ESCALA.e(self.COLUNA)
+        elif larg < ESCALA.e(self.LISTA_MIN):
+            alvo = ESCALA.e(self.LISTA_MIN)
+        if alvo is not None and alvo != larg:
+            self.divisor.setSizes([alvo, max(1, total - alvo)])
+        coluna = self.divisor.sizes()[0] <= ESCALA.e(self.COLUNA)
+        for w in (self.busca, self.faixa_abas, self.nome_usuario):
+            w.setVisible(not coluna)
+        if coluna:
+            self.resultados.setVisible(False)
+        self.lista.viewport().update()
 
     def alternar_lista(self):
         self._lista_recolhida = not self._lista_recolhida
@@ -5948,6 +6014,8 @@ class Janela(QMainWindow):
         self.cfg = novo
         if trocou_tema:
             self.aplicar_tema(novo["tema"])
+        if novo["escala"] != ESCALA.valor:
+            self.zoom(novo["escala"] - ESCALA.valor)
         if conexao_mudou:
             self.statusBar().showMessage(
                 "conexão alterada — reinicie o app para valer (uv run main.py)"

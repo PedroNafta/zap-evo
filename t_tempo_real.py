@@ -446,5 +446,33 @@ assert j.windowTitle().startswith("("), j.windowTitle()
 ok += 1
 print("ok  janela atrás: alerta de urgência ao WM; título com as não lidas")
 
-print(f"\n{ok}/23 passaram")
+# ---------- separador encaixa: coluna de avatares (Telegram) e lista mínima
+j.resize(1200, 700)
+j._lista_recolhida = False
+j._ajustar_modo()
+total = sum(j.divisor.sizes())
+j.divisor.setSizes([main.ESCALA.e(150), total - main.ESCALA.e(150)])
+j._encaixar_lista()
+assert j.divisor.sizes()[0] == main.ESCALA.e(j.COLUNA), j.divisor.sizes()
+assert j.busca.isHidden() and j.faixa_abas.isHidden(), "coluna ainda mostra busca/abas"
+j.divisor.setSizes([main.ESCALA.e(200), total - main.ESCALA.e(200)])
+j._encaixar_lista()
+assert j.divisor.sizes()[0] == main.ESCALA.e(j.LISTA_MIN) and not j.busca.isHidden()
+j.chats.definir([{"remoteJid": FONE, "pushName": "Carla", "unreadCount": 2,
+                  "lastMessage": {"message": {"conversation": "oi"}}}])
+dica = j.chats.data(j.chats.index(0), main.Qt.ToolTipRole)
+assert dica.startswith("Carla"), dica
+ok += 1
+print("ok  separador encaixa: coluna de avatares <170px, lista mínima até 260px")
+
+# ---------- escala da interface nas configurações, em porcentagem
+assert main.ESCALA.porcento(main.Escala.BASE) == 100
+c = main.Config(j.cfg, j)
+c.escala.setCurrentIndex(c.escala.findData(main.Escala.BASE + 2))
+assert c.valores()["escala"] == main.Escala.BASE + 2 and c.escala.currentText() == "114%"
+c.close()
+ok += 1
+print("ok  escala da interface escolhida em % nas configurações")
+
+print(f"\n{ok}/25 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)
