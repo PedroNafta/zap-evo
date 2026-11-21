@@ -51,13 +51,29 @@ SLOTS = {
 }
 
 # pacote -> rótulo mostrado na configuração
-PACOTES = {
+ROTULOS = {
     "emoji": "Emoji (padrão)",
     "fluent-phosphor": "Fluent Color + Phosphor",
     "icons8-color": "Icons8 Color",
     "icons8-fluency": "Icons8 Fluency",
 }
 PADRAO = "emoji"
+
+
+def _disponiveis() -> dict[str, str]:
+    """Só oferece pacote cujos arquivos existem: o clone público não traz todos."""
+    prontos = {"emoji": ROTULOS["emoji"]}
+    for chave, rotulo in ROTULOS.items():
+        if chave == "emoji":
+            continue
+        pasta = PASTA / chave
+        tem = pasta.is_dir() and (any(pasta.glob("*.svg")) or any(pasta.glob("*.png")))
+        if tem:
+            prontos[chave] = rotulo
+    return prontos
+
+
+PACOTES = _disponiveis()
 
 # pacotes que pedem crédito visível (licença da Icons8)
 CREDITOS = {

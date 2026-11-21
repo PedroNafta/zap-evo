@@ -821,7 +821,10 @@ print("ok  segurar o 🎤 grava e soltar envia; clique curto mantém gravando")
 # ---------- pacote de ícones: troca sem reiniciar, emoji segue padrão
 import icones as pacotes_de_icones  # noqa: E402
 
-for pac in ("fluent-phosphor", "icons8-color", "icons8-fluency"):
+# o clone público não traz os pacotes da Icons8: testa o que estiver instalado
+disponiveis = [p for p in pacotes_de_icones.PACOTES if p != "emoji"]
+assert disponiveis, "nenhum pacote de desenho instalado"
+for pac in disponiveis:
     faltando = [s for s in pacotes_de_icones.SLOTS
                 if pacotes_de_icones.icone(pac, s) is None
                 or pacotes_de_icones.icone(pac, s).isNull()]
@@ -836,7 +839,7 @@ assert j.b_mic.text() == "🎤" and j.b_mic.icon().isNull(), "no pacote emoji o 
 j.campo.setPlainText("texto qualquer")
 QTest.qWait(30)
 assert j.b_mic.text() == "➤", j.b_mic.text()
-j.pacote_icones = "icons8-color"
+j.pacote_icones = disponiveis[0]
 j.aplicar_pacote_icones()
 assert j.b_mic.text() == "" and not j.b_mic.icon().isNull(), "com texto o botão devia virar ➤ desenhado"
 j.campo.clear()
@@ -859,8 +862,9 @@ print("ok  menu troca emoji por ícone (e volta) conforme o pacote")
 cfg_icones = dict(cfg, pacote="x")
 dlg_icones = main.Config(cfg_icones, j)
 assert dlg_icones.pacote_icones.count() == len(pacotes_de_icones.PACOTES), dlg_icones.pacote_icones.count()
-dlg_icones.pacote_icones.setCurrentIndex(dlg_icones.pacote_icones.findData("icons8-fluency"))
-assert dlg_icones.valores()["icones"] == "icons8-fluency", dlg_icones.valores().get("icones")
+escolhido = disponiveis[-1]
+dlg_icones.pacote_icones.setCurrentIndex(dlg_icones.pacote_icones.findData(escolhido))
+assert dlg_icones.valores()["icones"] == escolhido, dlg_icones.valores().get("icones")
 ok += 1
 print("ok  a configuração oferece os 4 pacotes e grava a escolha")
 
