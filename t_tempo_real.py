@@ -30,6 +30,7 @@ main.ANIMA = main.Animador()
 cfg = dict(api.load_config(), host="http://127.0.0.1:9", notificar=False)
 gravados = []
 api.salvar_config = gravados.append  # zoom/divisor gravam o config: nunca o real
+api.gravar_json = lambda *a, **k: None  # favoritas, arquivadas... idem
 j = main.Janela(cfg)
 FONE, LID = "5581999990000@s.whatsapp.net", "99999999999@lid"
 ok = 0
@@ -474,5 +475,69 @@ c.close()
 ok += 1
 print("ok  escala da interface escolhida em % nas configurações")
 
-print(f"\n{ok}/25 passaram")
+# ---------- divisor "N mensagens não lidas" antes da primeira não lida
+lote3 = lote(30, de=200)
+j._todos = [{"remoteJid": FONE, "_jids": [FONE], "unreadCount": 3}]
+j.msgs.jids = [FONE]
+j._naolidas_ao_abrir = 3
+j._pintar_conversa(FONE, lote3, 1)
+QTest.qWait(50)
+marcadas = [m for m in j.msgs.itens if m.get("_divisor_naolidas")]
+assert len(marcadas) == 1 and marcadas[0]["_divisor_naolidas"] == 3, marcadas
+ix_div = j.msgs.index(j.msgs.itens.index(marcadas[0]))
+alto_com = j.conversa.itemDelegate().sizeHint(j.conversa.viewOptions() if hasattr(j.conversa, "viewOptions") else main.QStyleOptionViewItem(), ix_div).height()
+marcadas[0].pop("_divisor_naolidas")
+alto_sem = j.conversa.itemDelegate().sizeHint(main.QStyleOptionViewItem(), ix_div).height()
+assert alto_com > alto_sem, "a faixa não ganhou altura"
+ok += 1
+print("ok  faixa 'N mensagens não lidas' antes da primeira não lida")
+
+# ---------- áudio: ⏳ baixando e ⚠ indisponível na própria bolha
+mudo_aud = dict(voz, _arquivo=None, key={"id": "a2", "fromMe": False, "remoteJid": FONE})
+j.msgs.abrir(FONE, [mudo_aud], 1)
+j.msgs.jids = [FONE]
+j._buscar_midia = lambda m: None
+QTest.qWait(50)
+assert j._clique_audio(j.msgs.index(0), main.QPoint(0, 0), mudo_aud)
+assert mudo_aud.get("_baixando"), "clique num áudio sem arquivo não marcou ⏳"
+j._midia_falhou(mudo_aud)
+assert mudo_aud.get("_indisponivel") and not mudo_aud.get("_baixando")
+ok += 1
+print("ok  áudio sem arquivo: ⏳ na bolha ao baixar, ⚠ se falhar")
+
+# ---------- aviso flutuante com Desfazer; faixa de conexão
+chat_a = {"remoteJid": "arq@s.whatsapp.net", "_jids": ["arq@s.whatsapp.net"]}
+j._todos = [chat_a]
+j.api.arquivar = lambda *a: None
+j._arquivar_chat(chat_a)
+assert "arq@s.whatsapp.net" in j.arquivadas and not j.aviso.isHidden()
+assert not j.aviso.b_desfazer.isHidden()
+j.aviso.b_desfazer.click()
+assert "arq@s.whatsapp.net" not in j.arquivadas and j.aviso.isHidden(), "Desfazer não desarquivou"
+j.mostrar_conexao("caiu")
+assert not j.faixa_conexao.isHidden()
+j._ressincronizar = lambda: None
+j.mostrar_conexao("open")
+assert j.faixa_conexao.isHidden()
+ok += 1
+print("ok  'Conversa arquivada' com Desfazer; faixa amarela enquanto a conexão cai")
+
+# ---------- mensagem que falhou: clicar tenta de novo
+falhou = j._eco_local(FONE, "vai de novo")
+falhou["status"] = "ERROR"
+tentativas = []
+j._enviar_texto = lambda jid, texto, citado, prov: tentativas.append((jid, texto))
+QTest.qWait(50)
+assert j._pode_reenviar(falhou)
+j.reenviar(falhou)
+QTest.qWait(50)
+prazo = time.time() + 5
+while not tentativas and time.time() < prazo:
+    QApplication.processEvents()
+    time.sleep(0.01)
+assert tentativas == [(FONE, "vai de novo")] and falhou["status"] == "PENDING", tentativas
+ok += 1
+print("ok  mensagem que falhou: clicar (ou o menu) tenta enviar de novo")
+
+print(f"\n{ok}/29 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)

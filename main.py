@@ -611,6 +611,10 @@ QStatusBar {{ background:{P['painel']}; color:{P['fraco']}; border-top:1px solid
 QSplitter::handle {{ background:transparent; border-left:1px solid {P['divisor']}; }}
 QSplitter::handle:hover, QSplitter::handle:pressed {{ background:{P['selecao']}; border-left:2px solid {P['accent']}; }}
 #pilula {{ background:{P['selecao']}; border-radius:8px; }}
+#aviso {{ background:{P['texto']}; border-radius:8px; }}
+#aviso QLabel {{ color:{P['fundo']}; background:transparent; }}
+#aviso QPushButton {{ color:{P['accent']}; background:transparent; border:none; font-weight:bold; font-size:{ESCALA.px()}px; padding:4px 8px; }}
+#faixa_conexao {{ background:#f2c744; color:#1b1b1b; padding:6px 10px; border-radius:6px; }}
 #pilula QTextEdit, #pilula QTextEdit:focus {{ background:transparent; border:none; }}
 #pilula QPushButton {{ background:transparent; border:none; }}
 #b_mais {{ font-size:{ESCALA.px() + 8}px; }}
@@ -1402,7 +1406,9 @@ class Balao(QStyledItemDelegate):
         # QSize(0, …) faz o item ocupar a largura do viewport. Devolver a largura
         # da BOLHA fazia o QListView reservar conteúdo mais largo que a janela.
         respiro = ESCALA.e(2) if self._mesmo_autor(ix) else self.MARGEM
-        return QSize(0, alto + respiro + (self.DIA if self._vira_o_dia(ix) else 0))
+        extra = (self.DIA if self._vira_o_dia(ix) else 0) + (
+            self.DIA if (item_de(ix) or {}).get("_divisor_naolidas") else 0)
+        return QSize(0, alto + respiro + extra)
 
     # ---------- cartões ----------
 
@@ -1460,6 +1466,8 @@ class Balao(QStyledItemDelegate):
         """
         topo = opt.rect.top()
         if self._vira_o_dia(ix):
+            topo += self.DIA
+        if msg.get("_divisor_naolidas"):
             topo += self.DIA
         margem = max(ESCALA.e(8), int(opt.rect.width() * 0.05))
         recuo = self.RECUO if self._em_grupo(msg) else 0
@@ -1592,7 +1600,10 @@ class Balao(QStyledItemDelegate):
         p.drawEllipse(botao)
         p.setPen(QColor(P["texto"]))
         p.setFont(fonte(opt.font, 2))
-        p.drawText(botao, Qt.AlignCenter, "⏸" if tocando else "▶")
+        # baixando / indisponível aparecem no botão (antes: texto no rodapé)
+        icone = "⏳" if msg.get("_baixando") else "⚠" if msg.get("_indisponivel") else (
+            "⏸" if tocando else "▶")
+        p.drawText(botao, Qt.AlignCenter, icone)
 
         # a onda do payload vem com a mensagem e nao depende de download; os
         # picos do ffmpeg so' entram quando ela nao veio (audio nosso, antigo)
@@ -1785,6 +1796,17 @@ class Balao(QStyledItemDelegate):
             p.drawRoundedRect(pilula, 10, 10)
             p.setPen(QColor(P["fraco"]))
             p.drawText(pilula, Qt.AlignCenter, dia)
+            topo += self.DIA
+        if n := msg.get("_divisor_naolidas"):
+            # a faixa do Web antes da primeira não lida: a largura toda
+            faixa = QRect(opt.rect.left(), topo + ESCALA.e(4), opt.rect.width(), self.DIA - ESCALA.e(8))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(_mix(P["fundo"], P["texto"], 0.08)))
+            p.drawRect(faixa)
+            p.setFont(fonte(opt.font, -1.5, negrito=True))
+            p.setPen(QColor(P["accent"]))
+            p.drawText(faixa, Qt.AlignCenter,
+                       f"{n} mensage{'m' if n == 1 else 'ns'} não lida{'' if n == 1 else 's'}")
             topo += self.DIA
 
         # margem lateral proporcional: 5% em tela larga, piso para tiling estreito
@@ -4353,7 +4375,7 @@ class DadosDoContato(QDialog):
             convite = QMenu(self)
             convite.addAction("⧉  Copiar link").triggered.connect(
                 lambda: (QApplication.clipboard().setText(self.link_convite),
-                         self.j.statusBar().showMessage("link de convite copiado"))
+                         self.j.aviso.mostrar("Link de convite copiado"))
             )
             convite.addAction("↻  Gerar link novo (invalida o atual)").triggered.connect(
                 self.revogar_convite
@@ -5155,6 +5177,54 @@ def _tile_textura() -> QPixmap:
     return _TEXTURA_CACHE[chave]
 
 
+class Aviso(QFrame):
+    """Aviso flutuante breve sobre a conversa — o "snackbar" do Web — com
+    Desfazer quando a ação tem volta. Confirmação de ação é feedback
+    essencial: no rodapé ninguém via, e não havia como voltar atrás."""
+
+    def __init__(self, pai):
+        super().__init__(pai)
+        self.setObjectName("aviso")
+        self.texto = QLabel()
+        self.b_desfazer = QPushButton("Desfazer")
+        self.b_desfazer.setCursor(Qt.PointingHandCursor)
+        self.b_desfazer.clicked.connect(self._desfazer)
+        linha = QHBoxLayout(self)
+        linha.setContentsMargins(ESCALA.e(14), ESCALA.e(6), ESCALA.e(6), ESCALA.e(6))
+        linha.setSpacing(ESCALA.e(12))
+        linha.addWidget(self.texto)
+        linha.addWidget(self.b_desfazer)
+        self.relogio = QTimer(self)
+        self.relogio.setSingleShot(True)
+        self.relogio.timeout.connect(self.hide)
+        self._acao = None
+        self.hide()
+
+    def mostrar(self, texto: str, desfazer=None, ms: int = 4500):
+        self.texto.setText(texto)
+        self._acao = desfazer
+        self.b_desfazer.setVisible(desfazer is not None)
+        self.adjustSize()
+        pai = self.parentWidget()
+        # centrado na CONVERSA (onde a ação aconteceu), não na janela inteira
+        alvo = getattr(pai, "stack_direita", None)
+        if alvo is not None and alvo.isVisible():
+            canto = alvo.mapTo(pai, QPoint(0, 0))
+            x = canto.x() + (alvo.width() - self.width()) // 2
+        else:
+            x = (pai.width() - self.width()) // 2
+        self.move(max(0, x), pai.height() - self.height() - ESCALA.e(96))
+        self.show()
+        self.raise_()
+        self.relogio.start(ms)
+
+    def _desfazer(self):
+        acao, self._acao = self._acao, None
+        self.hide()
+        if acao:
+            acao()
+
+
 class FaixaRolavel(QScrollArea):
     """Abas que não cabem rolam de lado (roda do mouse incluída) em vez de
     serem cortadas — em tiling a lista fica estreita o tempo todo, e com zoom
@@ -5611,6 +5681,13 @@ class Janela(QMainWindow):
         esquerda.setContentsMargins(8, 0, 8, 0)
         esquerda.setSpacing(0)
         esquerda.addWidget(self.faixa_usuario)
+        # conexão caída é estado essencial: faixa amarela no topo da lista
+        # (como o Web), não um recado no rodapé
+        self.faixa_conexao = QLabel("⚠ Sem conexão com o servidor — reconectando…")
+        self.faixa_conexao.setObjectName("faixa_conexao")
+        self.faixa_conexao.setWordWrap(True)
+        self.faixa_conexao.hide()
+        esquerda.addWidget(self.faixa_conexao)
         corpo_esq = QVBoxLayout()
         corpo_esq.setContentsMargins(0, 8, 0, 0)
         corpo_esq.setSpacing(6)
@@ -5643,6 +5720,7 @@ class Janela(QMainWindow):
         div.duplo.connect(lambda: (div.setSizes([ESCALA.e(380), 10_000]), self._encaixar_lista()))
         QTimer.singleShot(0, self._encaixar_lista)  # a largura lembrada pode ser a coluna
         self.setCentralWidget(div)
+        self.aviso = Aviso(self)
         self.statusBar().showMessage("carregando…")
 
         self._chats_prontos.connect(self._pintar_chats)
@@ -6202,7 +6280,14 @@ class Janela(QMainWindow):
         api.salvar_arquivadas(self.arquivadas)
         POOL.submit(self._tentar, self.api.arquivar, chat, True)
         self._pintar_chats(self._todos)
-        self.statusBar().showMessage("conversa arquivada")
+        self.aviso.mostrar("Conversa arquivada", desfazer=lambda: self._desarquivar_chat(chat))
+
+    def _desarquivar_chat(self, chat: dict):
+        for j in chat.get("_jids") or [chat.get("remoteJid")]:
+            self.arquivadas.discard(j)
+        api.salvar_arquivadas(self.arquivadas)
+        POOL.submit(self._tentar, self.api.arquivar, chat, False)
+        self._pintar_chats(self._todos)
 
     def _desarquivar_jid(self, jid: str):
         if jid not in self.arquivadas:
@@ -6214,7 +6299,7 @@ class Janela(QMainWindow):
     def nao_lida_atual(self):
         if chat := self._chat_atual():
             POOL.submit(self._tentar, self.api.marcar_nao_lida, chat)
-            self.statusBar().showMessage("marcada como não lida")
+            self.aviso.mostrar("Marcada como não lida")
 
     def menu_do_chat(self, ponto: QPoint):
         ix = self.lista.indexAt(ponto)
@@ -6279,7 +6364,7 @@ class Janela(QMainWindow):
         def feito():
             chat["unreadCount"] = max(1, int(chat.get("unreadCount") or 0))
             self.aplicar_filtros()
-            self.statusBar().showMessage("marcada como não lida")
+            self.aviso.mostrar("Marcada como não lida")
         POOL.submit(self._depois, feito, self.api.marcar_nao_lida, chat)
 
     def bloquear_contato(self, chat: dict):
@@ -6292,7 +6377,9 @@ class Janela(QMainWindow):
         ) != QMessageBox.Yes:
             return
         POOL.submit(self._depois,
-                    lambda: self.statusBar().showMessage(f"{nome} bloqueado"),
+                    lambda: self.aviso.mostrar(f"{nome} bloqueado", desfazer=lambda: POOL.submit(
+                        self._depois, lambda: self.aviso.mostrar(f"{nome} desbloqueado"),
+                        self.api.bloquear, jid, False)),
                     self.api.bloquear, jid, True)
 
     def sair_do_grupo(self, chat: dict):
@@ -6468,6 +6555,10 @@ class Janela(QMainWindow):
         recebidas = [i for i, m in enumerate(self.msgs.itens)
                      if not (m.get("key") or {}).get("fromMe")]
         naolidas = recebidas[-n:] if n else []
+        for m in self.msgs.itens:
+            m.pop("_divisor_naolidas", None)  # sobra de uma abertura anterior
+        if naolidas:
+            self.msgs.itens[naolidas[0]]["_divisor_naolidas"] = len(naolidas)
         if naolidas:
             POOL.submit(self.api.marcar_lida,
                         [(self.msgs.itens[i].get("key") or {}) for i in naolidas])
@@ -6554,9 +6645,9 @@ class Janela(QMainWindow):
             if caminho := self.api.media_file(msg):
                 self._midia_pronta.emit(msg, str(caminho))
             else:
-                # ponteiro vencido no CDN ou rede fora: sem isto a bolha fica
-                # vazia para sempre e parece defeito de render.
-                self._aviso.emit("mídia indisponível — ponteiro expirado ou sem rede")
+                # ponteiro vencido no CDN ou rede fora: a bolha mostra ⚠ (clicar
+                # tenta de novo) — antes era só um recado no rodapé
+                self._na_gui.emit(lambda: self._midia_falhou(msg))
 
         MIDIA.submit(trabalho)
 
@@ -6657,8 +6748,20 @@ class Janela(QMainWindow):
                 )
                 return
 
+    def _midia_falhou(self, msg):
+        msg.pop("_baixando", None)
+        msg["_indisponivel"] = True
+        self.msgs.mudou(msg)
+        self.statusBar().showMessage("mídia indisponível — ponteiro expirado ou sem rede")
+
     def _pintar_midia(self, msg, caminho):
+        pediu_para_tocar = msg.pop("_baixando", None)
+        msg.pop("_indisponivel", None)
         msg["_arquivo"] = caminho
+        if pediu_para_tocar and (msg.get("messageType") or "") == "audioMessage":
+            # clicou ▶ num áudio ainda não baixado: toca quando chegar
+            quem = "Você" if (msg.get("key") or {}).get("fromMe") else (msg.get("pushName") or "")
+            AUDIO.alternar((msg.get("key") or {}).get("id", ""), caminho, quem)
         if (msg.get("messageType") or "") == "audioMessage":
             self._picos_do_audio(msg)  # onda real decodificada, sem travar o paint
         dono = (msg.get("key") or {}).get("remoteJid", "")
@@ -6703,6 +6806,9 @@ class Janela(QMainWindow):
         """
         meu = (msg.get("key") or {}).get("fromMe", False)
         menu = QMenu(pai or self)
+        if self._pode_reenviar(msg):
+            menu.addAction("↻  Tentar enviar de novo").triggered.connect(lambda: self.reenviar(msg))
+            menu.addSeparator()
 
         def agir(fn, sai=False):
             """Envolve a acao: fecha o visualizador antes quando precisa."""
@@ -6807,13 +6913,13 @@ class Janela(QMainWindow):
         if mid in self.favoritas:
             del self.favoritas[mid]
             msg.pop("_favorita", None)
-            self.statusBar().showMessage("removida dos favoritos")
+            self.aviso.mostrar("Removida dos favoritos", desfazer=lambda: self.favoritar(msg))
         else:
             guardado = {k: v for k, v in msg.items() if not k.startswith("_")}
             guardado["_chat"] = self.titulo.text()
             self.favoritas[mid] = guardado
             msg["_favorita"] = True
-            self.statusBar().showMessage("★ favoritada")
+            self.aviso.mostrar("★ Favoritada", desfazer=lambda: self.favoritar(msg))
         api.salvar_favoritas(self.favoritas)
         self.msgs.mudou(msg)
 
@@ -6887,7 +6993,7 @@ class Janela(QMainWindow):
             POOL.submit(self._tentar, self.api.send_file, jid, pathlib.Path(arq), api.text_of(msg))
         else:
             POOL.submit(self._tentar, self.api.send_text, jid, api.text_of(msg))
-        self.statusBar().showMessage(f"encaminhado para {alvo}")
+        self.aviso.mostrar(f"Encaminhada para {alvo}")
 
     def salvar_arquivo(self, msg: dict):
         origem = pathlib.Path(msg.get("_arquivo", ""))
@@ -6942,6 +7048,9 @@ class Janela(QMainWindow):
                 if not api.foi_apagada(msg) and (url := self._link_sob(ix, ponto, msg)):
                     QDesktopServices.openUrl(QUrl(url))
                     return True
+                if self._pode_reenviar(msg):
+                    self.reenviar(msg)  # o ⚠ do Web: clicar tenta de novo
+                    return True
                 if msg.get("messageType") == "audioMessage" and not api.foi_apagada(msg):
                     if self._clique_audio(ix, ponto, msg):
                         return True
@@ -6963,6 +7072,23 @@ class Janela(QMainWindow):
             if getattr(self, "botao_descer", None) and self.botao_descer.isVisible():
                 self._mostrar_botao_descer()
         return super().eventFilter(obj, ev)
+
+    @staticmethod
+    def _pode_reenviar(msg: dict) -> bool:
+        chave = msg.get("key") or {}
+        return msg.get("status") == "ERROR" and bool(chave.get("fromMe")) and \
+            str(chave.get("id", "")).startswith("local-")
+
+    def reenviar(self, msg: dict):
+        jid = (msg.get("key") or {}).get("remoteJid", "")
+        texto = api.text_of(msg)
+        if not jid or not texto:
+            return
+        msg["status"] = "PENDING"
+        self.msgs.mudou(msg)
+        if msg not in self._pendentes:
+            self._pendentes.append(msg)
+        POOL.submit(self._enviar_texto, jid, texto, msg.get("_citado"), msg)
 
     def _link_sob(self, ix, ponto, msg) -> str:
         """Link (no texto ou no cartão de prévia) sob o ponto. Antes nenhum
@@ -7046,8 +7172,10 @@ class Janela(QMainWindow):
     def _clique_audio(self, ix, ponto, msg) -> bool:
         arquivo = msg.get("_arquivo")
         if not arquivo:
+            msg.pop("_indisponivel", None)
+            msg["_baixando"] = True  # ⏳ no botão da própria bolha
+            self.msgs.mudou(msg)
             self._buscar_midia(msg)
-            self.statusBar().showMessage("baixando áudio…")
             return True
         meu = bool((msg.get("key") or {}).get("fromMe", False))
         # a caixa e o y vêm da MESMA replicação do paint — antes o hit-test
@@ -7102,6 +7230,7 @@ class Janela(QMainWindow):
         # evento do servidor depois so' troca o status — `chegou` nao duplica
         # porque o id e' o mesmo.
         provisoria = self._eco_local(jid, texto, citada)
+        provisoria["_citado"] = citado  # para o "tentar de novo"
         POOL.submit(self._enviar_texto, jid, texto, citado, provisoria)
         self.cancelar_resposta()
 
@@ -7140,7 +7269,7 @@ class Janela(QMainWindow):
                 self.msgs.mudou(provisoria)
 
             self._na_gui.emit(marcar_erro)
-            self._aviso.emit(f"não enviou: {e}")
+            self._aviso.emit(f"não enviou: {e} — clique na mensagem para tentar de novo")
             return
 
         def confirmar():
@@ -7763,6 +7892,8 @@ class Janela(QMainWindow):
 
     def _guardar_no_cache(self):
         """Chamado ao trocar de conversa: a anterior fica em espera."""
+        for m in self.msgs.itens:
+            m.pop("_divisor_naolidas", None)  # lidas ao sair: a faixa não volta
         self._limpar_cache()  # de graça: já estamos mexendo no cache
         if not self.msgs.jid:
             return
@@ -7793,6 +7924,7 @@ class Janela(QMainWindow):
         tela silenciosa e' idêntica a 'ninguem escreveu'.
         """
         caiu = estado in ("caiu", "offline", "close", "connecting")
+        self.faixa_conexao.setVisible(caiu)
         if caiu:
             # ponytail: o que chegou durante a queda nao esta' em conversa
             # nenhuma guardada — joga tudo fora e reabre do servidor
