@@ -739,5 +739,84 @@ assert j.focusWidget() is j.campo, (
 ok += 1
 print("ok  abrir a conversa leva o cursor direto para o campo de escrever")
 
-print(f"\n{ok}/38 passaram")
+# ---------- selecionar trecho na bolha: arrastar, realçar, copiar
+msg_txt = {"key": {"id": "s1", "fromMe": False, "remoteJid": FONE},
+           "messageType": "conversation", "messageTimestamp": 1795001000,
+           "message": {"conversation": "primeira parte do texto e a segunda parte"}}
+j.msgs.abrir(FONE, [msg_txt], 1)
+j.msgs.jids = [FONE]
+j.msgs.jid = FONE
+QTest.qWait(150)
+deleg = j.conversa.itemDelegate()
+ix_txt = j.msgs.index(0)
+rect_txt = j.conversa.visualRect(ix_txt)
+canto, doc_txt = deleg.links["s1"]["texto"]
+inteiro = doc_txt.toPlainText()
+ponto_letra = next(
+    (rect_txt.topLeft() + canto + main.QPoint(x, y)
+     for y in range(2, int(doc_txt.size().height()) + 1, 2)
+     for x in range(2, int(doc_txt.size().width()) + 1, 2)
+     if (pos := doc_txt.documentLayout().hitTest(
+         QPointF(main.QPoint(x, y)), main.Qt.FuzzyHit)) > 0),
+    None,
+)
+assert ponto_letra is not None, "nenhum ponto do texto reconhecido pelo hitTest"
+assert j._comecar_selecao(ix_txt, ponto_letra, msg_txt), \
+    "arrastar sobre o texto não abriu a seleção"
+deleg.selecao = ("s1", 0, 8)
+assert deleg.trecho_selecionado(msg_txt) == inteiro[:8], deleg.trecho_selecionado(msg_txt)
+main.QApplication.clipboard().clear()
+assert j.copiar_selecao() is True, "Ctrl+C não copiou o trecho"
+assert main.QApplication.clipboard().text() == inteiro[:8], \
+    main.QApplication.clipboard().text()
+ok += 1
+print("ok  arrastar sobre a bolha seleciona o trecho e Ctrl+C copia")
+
+
+def render_bolha(indice):
+    opt = main.QStyleOptionViewItem()
+    opt.rect = j.conversa.visualRect(j.msgs.index(indice))
+    opt.font = j.conversa.font()
+    img = QImage(opt.rect.size(), QImage.Format_ARGB32)
+    img.fill(0)
+    pintor = main.QPainter(img)
+    j.conversa.itemDelegate().paint(pintor, opt, j.msgs.index(indice))
+    pintor.end()
+    return bytes(img.bits())
+
+
+deleg.selecao = ("s1", 0, 8)
+com_selecao = render_bolha(0)
+deleg.selecao = None
+sem_selecao = render_bolha(0)
+assert com_selecao != sem_selecao, "o trecho selecionado não é realçado na bolha"
+deleg.selecao = ("s1", 0, 8)
+menu_sel = j.menu_para_mensagem(msg_txt)
+rotulos_sel = [a.text() for a in menu_sel.actions()]
+assert any("Copiar trecho" in r for r in rotulos_sel), rotulos_sel
+j._limpar_selecao()
+assert deleg.selecao is None, "soltar a seleção não limpou o realce"
+ok += 1
+print("ok  trecho selecionado é realçado, e o menu da bolha oferece copiar")
+
+# ---------- segurar o 🎤 grava; soltar depois envia (clique curto continua gravando)
+j.campo.clear()
+g.estado, g.log = "parado", []
+j._mic_pressionado()
+assert g.gravando(), "segurar o 🎤 não começou a gravar"
+j._mic_desde -= (j.MIC_SEGURAR + 0.2)  # finge que segurou o tempo suficiente
+paradas = g.log.count("parar")
+j._mic_solto()
+assert g.log.count("parar") == paradas + 1, "soltar depois de segurar não enviou"
+j._fim_gravacao()
+j._cancelar_gravacao()
+g.estado, g.log = "parado", []
+j._mic_pressionado()
+j._mic_solto()  # soltou na hora
+assert g.gravando() and "parar" not in g.log, "clique curto devia continuar gravando"
+j._cancelar_gravacao()
+ok += 1
+print("ok  segurar o 🎤 grava e soltar envia; clique curto mantém gravando")
+
+print(f"\n{ok}/41 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)

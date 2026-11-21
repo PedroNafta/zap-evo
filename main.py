@@ -19,6 +19,7 @@ import os
 import pathlib
 import shutil
 import sys
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -1180,6 +1181,77 @@ class Balao(QStyledItemDelegate):
         # relativo ao topo-esquerdo do item: o clique em link consulta isto em
         # vez de replicar a geometria (que depende de cabeçalho, citação, mídia).
         self.links: dict[str, dict] = {}
+        # Trecho selecionado: (id da mensagem, posição inicial, posição final)
+        # no documento de texto daquela bolha. Null até alguém arrastar o mouse.
+        self.selecao: tuple[str, int, int] | None = None
+
+    # ---------- seleção de trecho (arrastar sobre o texto) ----------
+    def _texto_sob_o_ponto(self, rect: QRect, msg: dict, ponto: QPoint):
+        """(documento, canto, posição do caractere) sob o ponto, ou None.
+
+        `hitTest` devolve -1 fora do texto — é o que separa "arrastar texto" de
+        "arrastar sobre a bolha", então a seleção só nasce em cima de letra.
+        """
+        alvo = self.links.get((msg.get("key") or {}).get("id", "")) or {}
+        if not (texto := alvo.get("texto")):
+            return None
+        canto, doc = texto
+        pos = doc.documentLayout().hitTest(QPointF(ponto - rect.topLeft() - canto), Qt.FuzzyHit)
+        return (doc, canto, pos) if pos >= 0 else None
+
+    def texto_do_documento(self, msg: dict) -> str:
+        """Texto inteiro da bolha (para limitar a seleção ao que foi desenhado)."""
+        alvo = self.links.get((msg.get("key") or {}).get("id", "")) or {}
+        if not (texto := alvo.get("texto")):
+            return ""
+        return texto[1].toPlainText()
+
+    def trecho_selecionado(self, msg: dict) -> str:
+        """O que está selecionado nesta bolha, já em texto colável."""
+        if not self.selecao or self.selecao[0] != (msg.get("key") or {}).get("id", ""):
+            return ""
+        alvo = self.links.get(self.selecao[0]) or {}
+        if not (texto := alvo.get("texto")):
+            return ""
+        doc = texto[1]
+        cursor = QTextCursor(doc)
+        cursor.setPosition(self.selecao[1])
+        cursor.setPosition(self.selecao[2], QTextCursor.KeepAnchor)
+        # selectedText traz U+2029 entre parágrafos; colado, isso não serve
+        return cursor.selectedText().replace("\u2029", "\n")
+
+    def _pintar_selecao(self, p, doc, msg: dict):
+        """Realça o trecho selecionado em coordenadas do documento."""
+        if not self.selecao or self.selecao[0] != (msg.get("key") or {}).get("id", ""):
+            return
+        ini, fim = self.selecao[1], self.selecao[2]
+        if ini >= fim:
+            return
+        p.save()
+        p.setPen(Qt.NoPen)
+        cor = QColor(P["accent"])
+        cor.setAlpha(90)
+        p.setBrush(cor)
+        bloco = doc.firstBlock()
+        while bloco.isValid():
+            base = bloco.position()
+            comeco = max(ini - base, 0)
+            final = min(fim - base, bloco.length() - 1)
+            if final > comeco:
+                topo = doc.documentLayout().blockBoundingRect(bloco).top()
+                lay = bloco.layout()
+                if lay:
+                    for i in range(lay.lineCount()):
+                        linha = lay.lineAt(i)
+                        a = max(comeco - linha.textStart(), 0)
+                        b = min(final - linha.textStart(), linha.textLength())
+                        if b <= a:
+                            continue
+                        x1 = linha.cursorToX(a)[0]
+                        x2 = linha.cursorToX(b)[0]
+                        p.drawRect(QRectF(x1, topo + linha.y(), x2 - x1, linha.height()))
+            bloco = bloco.next()
+        p.restore()
 
     # ponytail: property em vez de constante — sem isto nada acompanha o Ctrl+=.
     # Um round() por acesso custa ~80ns; o QFontMetrics do mesmo _medir custa
@@ -1943,6 +2015,7 @@ class Balao(QStyledItemDelegate):
             p.save()
             p.translate(caixa.left() + self.PAD, y)
             doc.drawContents(p)
+            self._pintar_selecao(p, doc, msg)
             p.restore()
 
         f_rodape = fonte(opt.font, -2.5)
@@ -5510,6 +5583,10 @@ class Janela(QMainWindow):
         fixo(self.b_mic, 40)
         self.b_mic.setToolTip("Gravar áudio")
         self.b_mic.clicked.connect(self._mic_ou_enviar)
+        # segurar o 🎤 grava e soltar envia (WhatsApp Web); clique curto deixa
+        # gravando, que é o modo antigo — os dois convivem
+        self.b_mic.pressed.connect(self._mic_pressionado)
+        self.b_mic.released.connect(self._mic_solto)
         self.campo.textChanged.connect(self._trocar_mic_enviar)
 
         self.b_emoji = QPushButton("😊")
@@ -5794,6 +5871,12 @@ class Janela(QMainWindow):
         ]:
             QShortcut(QKeySequence(combo), self, activated=acao)
 
+        # Ctrl+C copia o trecho selecionado na bolha — preso à conversa para não
+        # roubar o Ctrl+C de quem está escrevendo no campo
+        atalho_copiar = QShortcut(QKeySequence.Copy, self.conversa)
+        atalho_copiar.setContext(Qt.WidgetWithChildrenShortcut)
+        atalho_copiar.activated.connect(self.copiar_selecao)
+
         # ponytail: RSS a cada 30min. Subiu monotonicamente por 20h = vazou,
         # igual ao ZapZap. E' este log que diz se o projeto atingiu o objetivo.
         self.relogio = QTimer(self)
@@ -5852,6 +5935,9 @@ class Janela(QMainWindow):
         self.b_voltar.setVisible(estreito and aberta)
 
     COLUNA, LISTA_MIN = 84, 260  # px na escala base: os dois pontos de encaixe
+    # quanto tempo o 🎤 precisa ficar pressionado para soltar = enviar; abaixo
+    # disso o clique deixa gravando (o modo antigo, que continua valendo)
+    MIC_SEGURAR = 0.45
 
     def _encaixar_lista(self):
         """O separador encaixa em dois pontos, como no Telegram Desktop: abaixo
@@ -6528,6 +6614,7 @@ class Janela(QMainWindow):
         self.titulo.setText(nome)
         self._barra_da_conversa()
         self.stack_direita.setCurrentIndex(0)  # sai do repouso
+        self._limpar_selecao()  # trecho selecionado era da conversa anterior
         # abre já com o cursor no campo: quem clica na conversa já vai digitar
         QTimer.singleShot(0, self.focar_composer)
         retrato = foto(chat["_foto"], 40) if chat.get("_foto") else QPixmap()
@@ -6917,6 +7004,10 @@ class Janela(QMainWindow):
         """
         meu = (msg.get("key") or {}).get("fromMe", False)
         menu = QMenu(pai or self)
+        # trecho selecionado nesta bolha: copiar é a ação óbvia do menu
+        if self._msg_selecionada() is msg:
+            menu.addAction("⧉  Copiar trecho").triggered.connect(self.copiar_selecao)
+            menu.addSeparator()
         if self._pode_reenviar(msg):
             menu.addAction("↻  Tentar enviar de novo").triggered.connect(lambda: self.reenviar(msg))
             menu.addSeparator()
@@ -7148,6 +7239,7 @@ class Janela(QMainWindow):
         if obj is self.conversa.viewport() and esquerdo:
             ponto = ev.position().toPoint()
             ix = self.conversa.indexAt(ponto)
+            self._limpar_selecao()  # clique em qualquer lugar solta a anterior
             if ix.isValid():
                 msg = item_de(ix) or {}
                 if not api.foi_apagada(msg) and self._clique_local(ix, ponto, msg):
@@ -7169,7 +7261,13 @@ class Janela(QMainWindow):
                 # cair EM CIMA dela. Fora disso o clique morre aqui, como no Web.
                 if not api.foi_apagada(msg) and self._clique_midia(ix, ponto, msg):
                     return True
+                # arrastar sobre o texto seleciona o trecho; o clique simples
+                # segue exatamente como antes (a âncora só vale se arrastar)
+                if not api.foi_apagada(msg) and self._comecar_selecao(ix, ponto, msg):
+                    return False
         if obj is self.conversa.viewport() and ev.type() == QEvent.MouseMove:
+            if ev.buttons() & Qt.LeftButton and self._arrastar_selecao(ev.position().toPoint()):
+                return False
             # mãozinha sobre link, como em qualquer lugar clicável da web
             ponto = ev.position().toPoint()
             ix = self.conversa.indexAt(ponto)
@@ -7179,6 +7277,9 @@ class Janela(QMainWindow):
                 vp.setCursor(Qt.PointingHandCursor)
             elif vp.cursor().shape() == Qt.PointingHandCursor:
                 vp.unsetCursor()
+        if obj is self.conversa.viewport() and ev.type() == QEvent.MouseButtonRelease \
+                and ev.button() == Qt.LeftButton:
+            self._soltar_selecao()
         if obj is self.conversa.viewport() and ev.type() == QEvent.MouseButtonDblClick \
                 and ev.button() == Qt.LeftButton:
             # duplo clique na mensagem responde a ela (como no Telegram Desktop)
@@ -7193,6 +7294,71 @@ class Janela(QMainWindow):
             if getattr(self, "botao_descer", None) and self.botao_descer.isVisible():
                 self._mostrar_botao_descer()
         return super().eventFilter(obj, ev)
+
+    # ---------- seleção de trecho na bolha ----------
+    def _comecar_selecao(self, ix, ponto: QPoint, msg: dict) -> bool:
+        """Marca a âncora. A seleção só nasce se o mouse arrastar."""
+        deleg = self.conversa.itemDelegate()
+        achado = deleg._texto_sob_o_ponto(self.conversa.visualRect(ix), msg, ponto)
+        if not achado:
+            return False
+        self._sel = {"id": (msg.get("key") or {}).get("id", ""), "inicio": achado[2],
+                     "fim": achado[2], "ponto": ponto, "arrastou": False}
+        return True
+
+    def _arrastar_selecao(self, ponto: QPoint) -> bool:
+        """Estende a seleção. Fica na MESMA bolha: arrastar além dela gruda no
+        começo/fim do texto daquela mensagem, como no Telegram."""
+        sel = getattr(self, "_sel", None)
+        if not sel:
+            return False
+        if not sel["arrastou"]:
+            if (ponto - sel["ponto"]).manhattanLength() < 3:
+                return False
+            sel["arrastou"] = True
+        deleg = self.conversa.itemDelegate()
+        ix = self.conversa.indexAt(ponto)
+        msg = item_de(ix) if ix.isValid() else None
+        if msg is not None and (msg.get("key") or {}).get("id") == sel["id"]:
+            texto = deleg.texto_do_documento(msg)
+            achado = deleg._texto_sob_o_ponto(self.conversa.visualRect(ix), msg, ponto)
+            sel["fim"] = min(achado[2], len(texto)) if achado else len(texto)
+        deleg.selecao = (sel["id"], min(sel["inicio"], sel["fim"]),
+                         max(sel["inicio"], sel["fim"]))
+        self.conversa.viewport().update()
+        return True
+
+    def _soltar_selecao(self):
+        """Clique simples não deixa seleção; arrasto deixa (até o próximo clique)."""
+        sel = getattr(self, "_sel", None)
+        self._sel = None
+        if sel and not sel["arrastou"]:
+            self._limpar_selecao()
+
+    def _limpar_selecao(self):
+        self._sel = None
+        deleg = self.conversa.itemDelegate()
+        if deleg.selecao:
+            deleg.selecao = None
+            self.conversa.viewport().update()
+
+    def _msg_selecionada(self) -> dict | None:
+        deleg = self.conversa.itemDelegate()
+        if not deleg.selecao:
+            return None
+        alvo = deleg.selecao[0]
+        return next((m for m in self.msgs.itens
+                     if (m.get("key") or {}).get("id") == alvo), None)
+
+    def copiar_selecao(self) -> bool:
+        """Ctrl+C com trecho selecionado na bolha."""
+        msg = self._msg_selecionada()
+        texto = self.conversa.itemDelegate().trecho_selecionado(msg) if msg else ""
+        if not texto:
+            return False
+        QApplication.clipboard().setText(texto)
+        self.aviso.mostrar("Trecho copiado")
+        return True
 
     @staticmethod
     def _pode_reenviar(msg: dict) -> bool:
@@ -7700,11 +7866,27 @@ class Janela(QMainWindow):
         self.b_mic.setToolTip("Enviar" if com_texto else "Gravar áudio")
 
     def _mic_ou_enviar(self):
+        """Clique no botão: com texto é ➤ Enviar. Vazio, quem manda é o
+        segurar/soltar (`_mic_pressionado`/`_mic_solto`)."""
         if texto := self.campo.toPlainText().strip():
             self.campo.clear()
             self.enviar_texto(texto)
-        else:
+
+    def _mic_pressionado(self):
+        """Segurar o 🎤 começa a gravar. Com texto no campo ele é ➤ Enviar."""
+        if self.campo.toPlainText().strip() or not self.msgs.jid:
+            return
+        self._mic_desde = time.monotonic()
+        if not self.gravador.gravando():
             self.alternar_ptt()
+
+    def _mic_solto(self):
+        """Soltar depois de segurar envia; soltar rápido mantém gravando."""
+        if self.campo.toPlainText().strip() or not self.gravador.gravando():
+            return
+        segurou = time.monotonic() - getattr(self, "_mic_desde", 0.0)
+        if segurou >= self.MIC_SEGURAR and self._ptt_jid:
+            self._enviar_gravacao()
 
     def _enviar_gravacao(self):
         self.gravador.parar()  # o arquivo chega por `pronto` -> _ptt_pronto
