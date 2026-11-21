@@ -723,5 +723,21 @@ assert "✓  Marcar como lida" in rotulos, rotulos
 ok += 1
 print("ok  'Marcar como lida' zera local sem recibo; 'não lida' devolve o outro lado")
 
-print(f"\n{ok}/37 passaram")
+# ---------- abrir a conversa já deixa o cursor no campo de escrever
+j._carregar_conversa = lambda jid: None  # nada de rede
+j.chats.definir([{"remoteJid": FONE, "_jids": [FONE], "unreadCount": 0,
+                  "pushName": "Amigo"}])
+j.lista.setFocus()
+QTest.qWait(40)
+assert not j.campo.hasFocus(), "pré-condição: o foco deveria estar na lista"
+j.abrir_chat(j.chats.index(0))
+QTest.qWait(120)
+# hasFocus() exige janela ativa; no offscreen o aviso pode estar na frente
+# da janela, então a checagem é quem É o widget de foco
+assert j.focusWidget() is j.campo, (
+    f"foco ficou em {type(j.focusWidget()).__name__}, não no campo de escrever")
+ok += 1
+print("ok  abrir a conversa leva o cursor direto para o campo de escrever")
+
+print(f"\n{ok}/38 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)

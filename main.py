@@ -6528,6 +6528,8 @@ class Janela(QMainWindow):
         self.titulo.setText(nome)
         self._barra_da_conversa()
         self.stack_direita.setCurrentIndex(0)  # sai do repouso
+        # abre já com o cursor no campo: quem clica na conversa já vai digitar
+        QTimer.singleShot(0, self.focar_composer)
         retrato = foto(chat["_foto"], 40) if chat.get("_foto") else QPixmap()
         self.avatar_topo.setPixmap(retrato if not retrato.isNull() else avatar(nome, jid, 40))
         # o cartao de voz mostra a foto de quem falou (como no Web): o delegate
@@ -7519,6 +7521,17 @@ class Janela(QMainWindow):
             self.atualizar_subtitulo()
 
         self._na_gui.emit(pintar)
+
+    def focar_composer(self):
+        """Cursor no campo ao abrir a conversa — quem abre já vai digitar.
+
+        Chamado com `singleShot(0)` porque no clique o widget ainda está
+        trocando de página; e não insiste quando a caixa está travada (grupo
+        só de anúncios) ou fora da tela.
+        """
+        if self.campo.isReadOnly() or not self.campo.isVisible():
+            return
+        self.campo.setFocus(Qt.OtherFocusReason)
 
     def travar_composer(self, motivo: str):
         """Caixa fechada, como no WhatsApp quando o grupo é só de anúncios."""
