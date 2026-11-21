@@ -8257,6 +8257,15 @@ class Janela(QMainWindow):
     def sincronizar_chats(self, itens: list):
         """Traz do WhatsApp o que a Evolution repassar: mute, arquivado, não lidas."""
         mudou = False
+        # a mesma notificação traz o par número<->@lid: é a hora de refundir as
+        # linhas que o socket criou repetidas enquanto o @lid era desconhecido
+        api.aprender_lids([x.get("lastMessage") or x for x in itens])
+        antes = len(self._todos)
+        unidos = api.unir_duplicados(self._todos)
+        if len(unidos) < antes:
+            self._todos = unidos
+            self._pede_reordem()
+            mudou = True
         for x in itens:
             if api.importar_mute(x, self.mudos):
                 mudou = True
@@ -8305,7 +8314,10 @@ class Janela(QMainWindow):
         Vale para mensagem recebida e para mensagem enviada de outro aparelho —
         ambas chegam pelo socket (`messages.upsert` e `send.message`).
         """
-        jids = api.jids_da_msg(msg) | {jid}
+        # o @lid chega antes de ser conhecido: aprende agora para a linha do
+        # número ser encontrada em vez de nascer uma conversa repetida
+        api.aprender_lids([msg])
+        jids = api.jids_da_msg(msg) | set(api.jids_do_contato(jid))
         iguais = [c for c in self._todos if jids & set(c.get("_jids") or [c.get("remoteJid")])]
         alvo = iguais[0] if iguais else None
         if alvo is not None:

@@ -916,5 +916,33 @@ assert carregou == [NUM], "com o cache atrasado, tinha que buscar no servidor"
 ok += 1
 print("ok  cache velho não esconde o @lid e a conversa é conferida no servidor")
 
-print(f"\n{ok}/48 passaram")
+# ---------- conversa repetida na lista quando o @lid chega pelo socket
+api.LIDS.clear()
+j._todos = [{"remoteJid": NUM, "_jids": [NUM], "pushName": "Pedro Cunha", "unreadCount": 0}]
+chega = {"key": {"id": "DUP1", "fromMe": False, "remoteJid": LID, "remoteJidAlt": NUM},
+         "messageType": "conversation", "messageTimestamp": 1795300000,
+         "pushName": "Pedro Cunha", "message": {"conversation": "oi"}}
+j.registrar_atividade(LID, chega)
+assert len(j._todos) == 1, f"abriu linha repetida: {[c.get('remoteJid') for c in j._todos]}"
+assert set(j._todos[0]["_jids"]) == {NUM, LID}, j._todos[0]["_jids"]
+ok += 1
+print("ok  mensagem pelo @lid entra na linha do número em vez de duplicar")
+
+# e se a repetida já tiver nascido, a notificação de chats do WhatsApp funde
+j._todos = [{"remoteJid": NUM, "_jids": [NUM], "unreadCount": 0,
+             "updatedAt": "2026-11-21T13:40:00"},
+            {"remoteJid": LID, "_jids": [LID], "unreadCount": 2,
+             "updatedAt": "2026-11-21T14:12:00"}]
+j.sincronizar_chats([{"remoteJid": LID, "unreadCount": 2,
+                      "lastMessage": {"key": {"id": "DUP2", "fromMe": False,
+                                              "remoteJid": LID, "remoteJidAlt": NUM},
+                                      "messageType": "conversation",
+                                      "messageTimestamp": 1795300000,
+                                      "message": {"conversation": "oi"}}}])
+assert len(j._todos) == 1, [c.get("remoteJid") for c in j._todos]
+assert set(j._todos[0]["_jids"]) == {NUM, LID}, j._todos[0]["_jids"]
+ok += 1
+print("ok  notificação de chats funde a linha repetida do @lid")
+
+print(f"\n{ok}/50 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)
