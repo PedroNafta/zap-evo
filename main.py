@@ -5342,6 +5342,7 @@ class Janela(QMainWindow):
         self.fixados = api.carregar_fixados()
         self.apelidos = api.carregar_apelidos()
         self.mudos = api.carregar_silenciados()
+        self.lidas = api.carregar_lidas()
         self.favoritas = api.carregar_favoritas()
         self.chats, self.msgs = ChatList(), Mensagens()
 
@@ -6224,6 +6225,38 @@ class Janela(QMainWindow):
             else:
                 self._aviso.emit("offline — mostrando a última lista conhecida")
 
+    # ---------- leitura local: o app lê, o WhatsApp real não fica sabendo ----------
+    def _lida_local(self, chat: dict) -> bool:
+        """A última mensagem desta conversa já foi lida AQUI?"""
+        ts = float((chat.get("lastMessage") or {}).get("messageTimestamp") or 0)
+        if not ts:
+            return False
+        return any(ts <= self.lidas.get(j, 0)
+                   for j in (chat.get("_jids") or [chat.get("remoteJid") or ""]))
+
+    def _marcar_lida_local(self, chat: dict, ts: float | None = None) -> None:
+        """Registra até onde a conversa foi lida, sem enviar recibo ao WhatsApp.
+
+        É o oposto de `api.marcar_lida`: aquela rota manda "lido" para o
+        celular. Aqui a leitura vale só para esta instância — o findChats
+        continua devolvendo o unreadCount dele, e é este registro que impede a
+        mesma mensagem de voltar como nova.
+        """
+        ts = float(ts or (chat.get("lastMessage") or {}).get("messageTimestamp") or 0)
+        if not ts:
+            return
+        for j in chat.get("_jids") or [chat.get("remoteJid") or ""]:
+            if j:
+                self.lidas[j] = max(self.lidas.get(j, 0), ts)
+        api.salvar_lidas(self.lidas)
+
+    def _esquecer_lida_local(self, chat: dict) -> None:
+        """'Marcar como não lida': sem isto a normalização zerava de novo."""
+        for j in chat.get("_jids") or [chat.get("remoteJid") or ""]:
+            if j:
+                self.lidas.pop(j, None)
+        api.salvar_lidas(self.lidas)
+
     def _pintar_chats(self, chats):
         aberta = self.msgs.jid
         for c in chats:
@@ -6232,6 +6265,8 @@ class Janela(QMainWindow):
             c["_mudo"] = any(
                 api.esta_mudo(self.mudos, j) for j in (c.get("_jids") or [c.get("remoteJid")])
             )
+            if c.get("unreadCount") and self._lida_local(c):
+                c["unreadCount"] = 0  # já lida aqui: o servidor não sabe disso
         self._todos = api.ordenar(chats, self.fixados)
         self.aplicar_filtros()
         fixos = len(self.fixados)
@@ -6309,6 +6344,7 @@ class Janela(QMainWindow):
 
     def nao_lida_atual(self):
         if chat := self._chat_atual():
+            self._esquecer_lida_local(chat)
             POOL.submit(self._tentar, self.api.marcar_nao_lida, chat)
             self.aviso.mostrar("Marcada como não lida")
 
@@ -6357,9 +6393,17 @@ class Janela(QMainWindow):
         # "Apagar conversa" e "Limpar conversa" NAO entram: conferido na fonte
         # do tag 2.3.7 (chat.router.ts) — nao existe rota para nenhuma das duas.
         menu.addSeparator()
-        menu.addAction("✉  Marcar como não lida").triggered.connect(
-            lambda: self.marcar_nao_lida(chat)
-        )
+        # Lida e não lida são os dois lados da mesma balança: com não lidas o
+        # menu oferece marcar como lida, sem elas oferece marcar como não lida.
+        # As duas são locais — nenhuma manda recibo ao WhatsApp.
+        if int(chat.get("unreadCount") or 0) and not self._lida_local(chat):
+            menu.addAction("✓  Marcar como lida").triggered.connect(
+                lambda: self.marcar_lida(chat)
+            )
+        else:
+            menu.addAction("✉  Marcar como não lida").triggered.connect(
+                lambda: self.marcar_nao_lida(chat)
+            )
         if jid.endswith("@g.us"):
             menu.addAction("🚪  Sair do grupo").triggered.connect(
                 lambda: self.sair_do_grupo(chat)
@@ -6370,12 +6414,23 @@ class Janela(QMainWindow):
             )
         return menu
 
+    def marcar_lida(self, chat: dict):
+        """O outro lado do 'Marcar como não lida', e local: a leitura vale para
+        o app, sem recibo de leitura para o WhatsApp (o celular segue dono das
+        não lidas dele)."""
+        self._marcar_lida_local(chat)
+        chat["unreadCount"] = 0
+        self.aplicar_filtros()
+        self.aviso.mostrar("Marcada como lida")
+
     def marcar_nao_lida(self, chat: dict):
         """O 'Marcar como não lida' do Web: existia so' no atalho Ctrl+Alt+Shift+U."""
         def feito():
             chat["unreadCount"] = max(1, int(chat.get("unreadCount") or 0))
             self.aplicar_filtros()
             self.aviso.mostrar("Marcada como não lida")
+        # o registro de leitura local não pode zerar de novo na próxima carga
+        self._esquecer_lida_local(chat)
         POOL.submit(self._depois, feito, self.api.marcar_nao_lida, chat)
 
     def bloquear_contato(self, chat: dict):
@@ -6571,8 +6626,14 @@ class Janela(QMainWindow):
         if naolidas:
             self.msgs.itens[naolidas[0]]["_divisor_naolidas"] = len(naolidas)
         if naolidas:
-            POOL.submit(self.api.marcar_lida,
-                        [(self.msgs.itens[i].get("key") or {}) for i in naolidas])
+            # leitura local: nada de recibo ao WhatsApp (o celular mantém as
+            # não lidas dele) — mas o app lembra até onde leu, senão a mesma
+            # mensagem volta como nova na próxima carga da lista
+            self._marcar_lida_local(
+                {"remoteJid": jid, "_jids": list(self.msgs.jids or [jid])},
+                max((m.get("messageTimestamp", 0) for m in registros), default=0)
+                or None,
+            )
         # a prévia da barra lateral pode ter ficado para trás (por exemplo, presa
         # no 🕐 de um envio): adota a última mensagem que acabou de chegar
         if registros:
@@ -7806,7 +7867,7 @@ class Janela(QMainWindow):
             if (n := x.get("unreadCount")) is not None:
                 for c in self._todos:
                     if jid in (c.get("_jids") or [c.get("remoteJid")]):
-                        c["unreadCount"] = int(n)
+                        c["unreadCount"] = 0 if self._lida_local(c) else int(n)
                         self.chats.mudou(c)
                         break
         if mudou:
@@ -7880,6 +7941,8 @@ class Janela(QMainWindow):
             alvo["unreadCount"] = int(alvo.get("unreadCount") or 0) + 1
         elif aberta:
             alvo["unreadCount"] = 0
+            # a conversa está na tela: a mensagem já nasceu lida aqui
+            self._marcar_lida_local(alvo, msg.get("messageTimestamp"))
 
         # ponytail: rajada de mensagens nao pode virar uma reordenacao por
         # mensagem — `aplicar_filtros` varre os 557 chats quatro vezes e reseta

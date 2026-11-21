@@ -657,5 +657,71 @@ finally:
 ok += 1
 print("ok  grupo: a foto do participante chega na bolha e não é re-pedida")
 
-print(f"\n{ok}/34 passaram")
+# ---------- leitura local: sem recibo ao WhatsApp e sem repetir as não lidas
+j.lidas.clear()
+recibos = []
+j.api.marcar_lida = lambda keys: recibos.append(keys)
+j._todos = [{"remoteJid": FONE, "_jids": [FONE], "unreadCount": 3}]
+j.msgs.jids = [FONE]
+j._naolidas_ao_abrir = 3
+j._pintar_conversa(FONE, lote(150, de=50), 5)
+QTest.qWait(400)
+assert not recibos, f"a abertura mandou recibo de leitura ao WhatsApp: {recibos}"
+chat_lido = j._todos[0]
+assert chat_lido.get("unreadCount") == 0, chat_lido.get("unreadCount")
+ts_lido = max(m["messageTimestamp"] for m in j.msgs.itens)
+assert j.lidas[FONE] >= ts_lido, (j.lidas, ts_lido)
+# o servidor continua devolvendo as não lidas dele: a lista não pode repetir
+chat_lido["lastMessage"] = {"key": {"id": "h302", "remoteJid": FONE},
+                            "messageTimestamp": ts_lido,
+                            "messageType": "conversation", "message": {"conversation": "x"}}
+j.sincronizar_chats([{"remoteJid": FONE, "unreadCount": 3}])
+assert chat_lido["unreadCount"] == 0, f"não lida repetida: {chat_lido['unreadCount']}"
+# mensagem nova (timestamp maior) volta a contar normalmente
+chat_lido["lastMessage"]["messageTimestamp"] = ts_lido + 600
+j.sincronizar_chats([{"remoteJid": FONE, "unreadCount": 2}])
+assert chat_lido["unreadCount"] == 2, chat_lido["unreadCount"]
+ok += 1
+print("ok  leitura é local: nenhum recibo ao WhatsApp e a não lida não se repete")
+
+# ---------- menu da lista: lida e não lida são um ou outro
+com_naolidas = dict(chat_lido, unreadCount=4)
+menu_lida = j.menu_para_chat(com_naolidas)
+assert menu_lida is not None
+rotulos = [a.text() for a in menu_lida.actions()]
+assert "✓  Marcar como lida" in rotulos, rotulos
+assert "✉  Marcar como não lida" not in rotulos, rotulos
+sem_naolidas = dict(chat_lido, unreadCount=0)
+menu_nao = j.menu_para_chat(sem_naolidas)
+assert menu_nao is not None
+rotulos = [a.text() for a in menu_nao.actions()]
+assert "✉  Marcar como não lida" in rotulos, rotulos
+assert "✓  Marcar como lida" not in rotulos, rotulos
+ok += 1
+print("ok  menu da lista oferece marcar como lida OU como não lida, nunca as duas")
+
+# ---------- marcar como lida pelo menu: zera local, sem tocar no servidor
+antes_recibos = len(recibos)
+j.marcar_lida(com_naolidas)
+assert com_naolidas["unreadCount"] == 0, com_naolidas["unreadCount"]
+assert j.lidas[FONE] >= float(com_naolidas["lastMessage"]["messageTimestamp"])
+assert len(recibos) == antes_recibos, "marcar como lida mandou recibo ao WhatsApp"
+menu_lida = j.menu_para_chat(com_naolidas)
+assert menu_lida is not None
+rotulos = [a.text() for a in menu_lida.actions()]
+assert "✉  Marcar como não lida" in rotulos, rotulos
+# e o inverso volta a oferecer "lida"
+j.api.marcar_nao_lida = lambda chat: {}
+sem = dict(com_naolidas, unreadCount=1)
+j.marcar_nao_lida(sem)
+QTest.qWait(50)
+assert FONE not in j.lidas, j.lidas
+menu_inverso = j.menu_para_chat(sem)
+assert menu_inverso is not None
+rotulos = [a.text() for a in menu_inverso.actions()]
+assert "✓  Marcar como lida" in rotulos, rotulos
+ok += 1
+print("ok  'Marcar como lida' zera local sem recibo; 'não lida' devolve o outro lado")
+
+print(f"\n{ok}/37 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)

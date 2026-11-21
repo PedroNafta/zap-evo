@@ -29,6 +29,7 @@ GIFS = pathlib.Path.home() / ".local/share/evolution-client/gifs"
 APELIDOS = CONFIG.parent / "apelidos.json"
 OCULTOS = CONFIG.parent / "ocultos.json"
 SILENCIADOS = CONFIG.parent / "silenciados.json"
+LIDAS = CONFIG.parent / "lidas.json"
 FAVORITAS = CONFIG.parent / "favoritas.json"
 # ponytail: aqui SIM e' ~/.cache/ — tudo isto se recria sozinho a partir do
 # servidor. E' o oposto da midia, que e' acervo e mora em ~/.local/share.
@@ -1819,6 +1820,26 @@ def carregar_arquivadas() -> set[str]:
 def salvar_arquivadas(ids: set[str]) -> None:
     ARQUIVADAS.parent.mkdir(parents=True, exist_ok=True)
     gravar_json(ARQUIVADAS, sorted(ids), ensure_ascii=False)
+
+
+def carregar_lidas() -> dict[str, float]:
+    """Até onde cada conversa já foi lida AQUI, por messageTimestamp.
+
+    A leitura é local de propósito: o app não envia recibo ao WhatsApp (o
+    celular segue com as não lidas dele). Sem este registro o findChats
+    devolvia o mesmo unreadCount para sempre e as mensagens já lidas voltavam
+    como novas a cada atualização da lista.
+    """
+    try:
+        dados = json.loads(LIDAS.read_text())
+        return {str(k): float(v) for k, v in dados.items()} if isinstance(dados, dict) else {}
+    except Exception:
+        return {}
+
+
+def salvar_lidas(mapa: dict[str, float]) -> None:
+    LIDAS.parent.mkdir(parents=True, exist_ok=True)
+    gravar_json(LIDAS, mapa, indent=2)
 
 
 # ---------- Tenor (seletor de GIF, como o WhatsApp Web usa Giphy) ----------
