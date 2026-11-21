@@ -119,6 +119,7 @@ from PySide6.QtWidgets import (
 
 import api
 import emojis
+import icones
 
 log = logging.getLogger("cliente")
 
@@ -5162,6 +5163,13 @@ class Config(QDialog):
         i = self.tema.findData(atual)
         self.tema.setCurrentIndex(i if i >= 0 else 0)
         form.addRow("Tema", self.tema)
+        # mesmo espírito do tema: escolhe o desenho dos ícones e vale na hora
+        self.pacote_icones = QComboBox()
+        for chave, rotulo in icones.PACOTES.items():
+            self.pacote_icones.addItem(rotulo, chave)
+        i = self.pacote_icones.findData(icones.normalizar(cfg.get("icones")))
+        self.pacote_icones.setCurrentIndex(i if i >= 0 else 0)
+        form.addRow("Ícones", self.pacote_icones)
         # o mesmo do Ctrl +/-, para quem prefere escolher a porcentagem
         self.escala = QComboBox()
         for v in range(Escala.MIN, Escala.MAX + 1):
@@ -5172,7 +5180,9 @@ class Config(QDialog):
         aviso = QLabel(
             "Notificações vêm desligadas; conversas silenciadas nunca notificam. "
             "Postgres é usado só pela busca global. "
-            "A apikey fica em ~/.config/evolution-client/config.toml, modo 600."
+            "A apikey fica em ~/.config/evolution-client/config.toml, modo 600. "
+            "Os pacotes de ícones da Icons8 pedem um link visível: "
+            "Ícones por Icons8 — icons8.com."
         )
         aviso.setWordWrap(True)
         aviso.setStyleSheet(f"color:{P['fraco']}; font-size:12px;")
@@ -5190,6 +5200,7 @@ class Config(QDialog):
         novo = dict(self.cfg)
         novo.update({k: c.text().strip() for k, c in self.entradas.items() if c.text().strip()})
         novo["tema"] = self.tema.currentData() or "whatsapp escuro"
+        novo["icones"] = self.pacote_icones.currentData() or icones.PADRAO
         novo["notificar"] = self.notificar.isChecked()
         novo["janela_horas"] = self.janela_h.value()
         novo["cache_gb"] = self.cache_gb.value()
@@ -5388,6 +5399,8 @@ class Janela(QMainWindow):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = dict(cfg)
+        # pacote de ícones escolhido na configuração; "emoji" é o padrão de sempre
+        self.pacote_icones = icones.normalizar(self.cfg.get("icones"))
         self.api = api.Api(cfg)
         self.setWindowTitle("zap-evo")
         self.resize(1100, 720)
@@ -5570,12 +5583,17 @@ class Janela(QMainWindow):
         fixo(self.b_mais, 40)
         self.b_mais.setToolTip("Anexar")
         menu_anexo = QMenu(self.b_mais)
-        menu_anexo.addAction("📄  Arquivo ou imagem").triggered.connect(self.escolher_arquivo)
-        menu_anexo.addAction("📷  Câmera").triggered.connect(self.abrir_camera)
-        menu_anexo.addAction("🎞  GIF").triggered.connect(self.abrir_gif)
-        menu_anexo.addAction("🏷  Figurinha").triggered.connect(self.enviar_sticker)
-        menu_anexo.addAction("📍  Localização").triggered.connect(self.enviar_local)
-        menu_anexo.addAction("👤  Contato").triggered.connect(self.enviar_contato)
+        for rotulo, slot, acao in (
+            ("Arquivo ou imagem", "documento", self.escolher_arquivo),
+            ("Câmera", "camera", self.abrir_camera),
+            ("GIF", "video", self.abrir_gif),
+            ("Figurinha", "imagem", self.enviar_sticker),
+            ("Localização", "mapa", self.enviar_local),
+            ("Contato", "contato", self.enviar_contato),
+        ):
+            item = menu_anexo.addAction(rotulo)
+            self.aplicar_icone_acao(item, slot, rotulo)
+            item.triggered.connect(acao)
         self.b_mais.setMenu(menu_anexo)
 
         # 🎤 com o campo vazio, ➤ com texto — o mesmo botão, como no Web
@@ -6184,12 +6202,18 @@ class Janela(QMainWindow):
         novo = dlg.valores()
         api.salvar_config(novo)
         trocou_tema = novo.get("tema") != self.cfg.get("tema", "escuro")
+        trocou_icones = novo.get("icones") != self.cfg.get("icones")
         conexao_mudou = any(
             novo.get(k) != self.cfg.get(k) for k in ("host", "apikey", "instance")
         )
         self.cfg = novo
         if trocou_tema:
             self.aplicar_tema(novo["tema"])
+        if trocou_icones:
+            self.pacote_icones = icones.normalizar(novo.get("icones"))
+            self.aplicar_pacote_icones()
+            self.lista.viewport().update()
+            self.conversa.viewport().update()
         if novo["escala"] != ESCALA.valor:
             self.zoom(novo["escala"] - ESCALA.valor)
         if conexao_mudou:
@@ -6451,15 +6475,16 @@ class Janela(QMainWindow):
         jid = chat.get("remoteJid", "")
         menu = QMenu(self)
         fixado = jid in self.fixados
-        menu.addAction("Desafixar" if fixado else "📌 Fixar no topo").triggered.connect(
-            lambda: self.alternar_fixado(jid)
-        )
+        self.aplicar_icone_acao(
+            menu.addAction("Desafixar" if fixado else "Fixar no topo"), "pino",
+            "Desafixar" if fixado else "Fixar no topo")
+        menu.actions()[-1].triggered.connect(lambda: self.alternar_fixado(jid))
         if api.esta_mudo(self.mudos, jid):
-            menu.addAction("🔔  Reativar som").triggered.connect(
-                lambda: self.silenciar(jid, None)
-            )
+            acao = menu.addAction("Reativar som")
+            self.aplicar_icone_acao(acao, "sino_cortado", "Reativar som")
+            acao.triggered.connect(lambda: self.silenciar(jid, None))
         else:
-            sub = menu.addMenu("🔕  Silenciar")
+            sub = self.aplicar_icone_acao(menu.addMenu("Silenciar"), "sino_cortado", "Silenciar")
             for rotulo, segundos in api.DURACOES_MUDO:
                 sub.addAction(rotulo).triggered.connect(
                     lambda _=False, s=segundos: self.silenciar(jid, s)
@@ -6467,11 +6492,13 @@ class Janela(QMainWindow):
         menu.addAction("ℹ  Informações").triggered.connect(lambda: self.info_do_chat())
         arquivado = jid in self.arquivadas
         if arquivado:
-            menu.addAction("📂  Desarquivar").triggered.connect(
-                lambda: self._desarquivar_jid(jid)
-            )
+            acao = menu.addAction("Desarquivar")
+            self.aplicar_icone_acao(acao, "arquivar", "Desarquivar")
+            acao.triggered.connect(lambda: self._desarquivar_jid(jid))
         else:
-            menu.addAction("🗄  Arquivar").triggered.connect(lambda: self.arquivar_atual())
+            acao = menu.addAction("Arquivar")
+            self.aplicar_icone_acao(acao, "arquivar", "Arquivar")
+            acao.triggered.connect(lambda: self.arquivar_atual())
         menu.addAction("✎ Renomear contato").triggered.connect(
             lambda: self.renomear(chat)
         )
@@ -6491,13 +6518,13 @@ class Janela(QMainWindow):
                 lambda: self.marcar_nao_lida(chat)
             )
         if jid.endswith("@g.us"):
-            menu.addAction("🚪  Sair do grupo").triggered.connect(
-                lambda: self.sair_do_grupo(chat)
-            )
+            acao = menu.addAction("Sair do grupo")
+            self.aplicar_icone_acao(acao, "fechar", "Sair do grupo")
+            acao.triggered.connect(lambda: self.sair_do_grupo(chat))
         else:
-            menu.addAction("⊘  Bloquear contato").triggered.connect(
-                lambda: self.bloquear_contato(chat)
-            )
+            acao = menu.addAction("Bloquear contato")
+            self.aplicar_icone_acao(acao, "cadeado", "Bloquear contato")
+            acao.triggered.connect(lambda: self.bloquear_contato(chat))
         return menu
 
     def marcar_lida(self, chat: dict):
@@ -7860,9 +7887,41 @@ class Janela(QMainWindow):
         self.b_emoji.setFixedHeight(
             QFontMetrics(self.campo.font()).lineSpacing() + ESCALA.e(16))
 
+    # ---------- ícones (pacote escolhido na configuração) ----------
+    def aplicar_icone(self, widget, slot: str, px: int = 22) -> str:
+        """Põe o desenho do slot. Devolve o texto a usar: emoji (pacote emoji) ou ''."""
+        desenho = icones.icone(self.pacote_icones, slot, px)
+        if desenho is None:
+            widget.setIcon(QIcon())
+            return icones.emoji(slot)
+        widget.setIcon(desenho)
+        widget.setIconSize(QSize(px, px))
+        return ""
+
+    def aplicar_icone_acao(self, acao, slot: str, rotulo: str, px: int = 18):
+        """QAction/QMenu: ícone do pacote, ou o emoji na frente do rótulo (pacote emoji)."""
+        desenho = icones.icone(self.pacote_icones, slot, px)
+        emoji = icones.emoji(slot)
+        texto = rotulo if desenho is not None else (f"{emoji}  {rotulo}" if emoji else rotulo)
+        if isinstance(acao, QMenu):
+            acao.setTitle(texto)
+        else:
+            acao.setText(texto)
+        if desenho is not None:
+            acao.setIcon(desenho)
+        return acao
+
+    def aplicar_pacote_icones(self):
+        """Reaplica nos botões fixos. Menus se refazem na próxima abertura."""
+        icones.limpar_cache()
+        self._trocar_mic_enviar()
+        if hasattr(self, "btn_busca"):
+            self.btn_busca.setText(self.aplicar_icone(self.btn_busca, "busca", 20))
+
     def _trocar_mic_enviar(self):
         com_texto = bool(self.campo.toPlainText().strip())
-        self.b_mic.setText("➤" if com_texto else "🎤")
+        slot = "enviar" if com_texto else "microfone"
+        self.b_mic.setText(self.aplicar_icone(self.b_mic, slot, 22))
         self.b_mic.setToolTip("Enviar" if com_texto else "Gravar áudio")
 
     def _mic_ou_enviar(self):

@@ -818,5 +818,51 @@ j._cancelar_gravacao()
 ok += 1
 print("ok  segurar o 🎤 grava e soltar envia; clique curto mantém gravando")
 
-print(f"\n{ok}/41 passaram")
+# ---------- pacote de ícones: troca sem reiniciar, emoji segue padrão
+import icones as pacotes_de_icones  # noqa: E402
+
+for pac in ("fluent-phosphor", "icons8-color", "icons8-fluency"):
+    faltando = [s for s in pacotes_de_icones.SLOTS
+                if pacotes_de_icones.icone(pac, s) is None
+                or pacotes_de_icones.icone(pac, s).isNull()]
+    assert not faltando, f"{pac} sem desenho em: {faltando}"
+assert pacotes_de_icones.normalizar("nao-existe") == "emoji", "pacote inválido devia cair no emoji"
+ok += 1
+print("ok  os 25 slots existem nos três pacotes, e pacote inválido cai em emoji")
+
+j.pacote_icones = "emoji"
+j.aplicar_pacote_icones()
+assert j.b_mic.text() == "🎤" and j.b_mic.icon().isNull(), "no pacote emoji o botão devia ficar como antes"
+j.campo.setPlainText("texto qualquer")
+QTest.qWait(30)
+assert j.b_mic.text() == "➤", j.b_mic.text()
+j.pacote_icones = "icons8-color"
+j.aplicar_pacote_icones()
+assert j.b_mic.text() == "" and not j.b_mic.icon().isNull(), "com texto o botão devia virar ➤ desenhado"
+j.campo.clear()
+QTest.qWait(30)
+assert j.b_mic.text() == "" and not j.b_mic.icon().isNull(), "com campo vazio o desenho devia ser o microfone"
+ok += 1
+print("ok  trocar de pacote troca o desenho do microfone/enviar sem reiniciar")
+
+menu_iconado = j.menu_para_chat({"remoteJid": FONE, "unreadCount": 0})
+assert menu_iconado is not None
+rotulos = [a.text() for a in menu_iconado.actions() if a.text()]
+assert any("Fixar no topo" in r for r in rotulos), rotulos
+assert not any("📌" in r for r in rotulos), "com pacote de ícones o rótulo não leva emoji"
+j.pacote_icones = "emoji"
+menu_emoji = j.menu_para_chat({"remoteJid": FONE, "unreadCount": 0})
+assert any("📌" in a.text() for a in menu_emoji.actions()), "no pacote emoji o rótulo volta a ter emoji"
+ok += 1
+print("ok  menu troca emoji por ícone (e volta) conforme o pacote")
+
+cfg_icones = dict(cfg, pacote="x")
+dlg_icones = main.Config(cfg_icones, j)
+assert dlg_icones.pacote_icones.count() == len(pacotes_de_icones.PACOTES), dlg_icones.pacote_icones.count()
+dlg_icones.pacote_icones.setCurrentIndex(dlg_icones.pacote_icones.findData("icons8-fluency"))
+assert dlg_icones.valores()["icones"] == "icons8-fluency", dlg_icones.valores().get("icones")
+ok += 1
+print("ok  a configuração oferece os 4 pacotes e grava a escolha")
+
+print(f"\n{ok}/45 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)

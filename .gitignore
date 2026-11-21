@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .ruff_cache/
+
+# pacotes da Icons8: a licença não permite redistribuir o pacote
+icones/icons8-*/
