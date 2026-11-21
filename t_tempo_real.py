@@ -539,5 +539,123 @@ assert tentativas == [(FONE, "vai de novo")] and falhou["status"] == "PENDING", 
 ok += 1
 print("ok  mensagem que falhou: clicar (ou o menu) tenta enviar de novo")
 
-print(f"\n{ok}/29 passaram")
+# ---------- grupo: o nome do autor não corta numa mensagem curta
+GRUPO = "123@g.us"
+curta = {"key": {"id": "g1", "fromMe": False, "remoteJid": GRUPO, "participant": "77@lid"},
+         "pushName": "Fulana de Tal Comprido", "messageType": "conversation",
+         "messageTimestamp": 1795000800, "message": {"conversation": "oi"}}
+j.msgs.abrir(GRUPO, [curta], 1)
+j.msgs.jids = [GRUPO]
+QTest.qWait(50)
+opt = main.QStyleOptionViewItem()
+opt.rect = j.conversa.visualRect(j.msgs.index(0))
+opt.font = j.conversa.font()
+deleg = j.conversa.itemDelegate()
+_m, _t, _p, _d, larg_bolha, _a, _mt = deleg._medir(opt, j.msgs.index(0))
+nome_px = main.QFontMetrics(main.fonte(opt.font, -0.5, negrito=True)).horizontalAdvance(
+    deleg._nome_autor(curta))
+assert larg_bolha - deleg.PAD_H * 2 >= nome_px, f"nome cortado: {larg_bolha} < {nome_px}"
+ok += 1
+print("ok  grupo: a hora na mesma linha não encolhe a bolha abaixo do nome do autor")
+
+# ---------- linha da lista: hora, badge e pino acompanham o Ctrl +/-
+# (33 medidas em px cru ignoravam a escala; no zoom alto a coluna da direita
+# saía desalinhada). Guarda de fonte: nenhum px cru dentro de ItemChat.paint.
+import re
+
+fonte_main = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+trecho_lista = fonte_main.split("class ItemChat")[1].split("def documento(")[0]
+crus = re.findall(r"r\.top\(\) \+ \d+|r\.right\(\) - \d+|max\(\d+, r\.width", trecho_lista)
+assert not crus, f"medida em px cru na linha da lista: {crus}"
+ok += 1
+print("ok  linha da lista: hora, badge e pino escalam junto com o zoom")
+
+
+def render_linha(chat, largura=420):
+    """Pinta a linha da lista num QImage e devolve os bytes — comparação estável."""
+    j.chats.definir([chat])
+    ix = j.chats.index(0)
+    opt = main.QStyleOptionViewItem()
+    opt.font = j.lista.font()
+    opt.rect = main.QRect(0, 0, largura, main.ESCALA.e(72))
+    img = QImage(opt.rect.size(), QImage.Format_ARGB32)
+    img.fill(0)
+    pintor = main.QPainter(img)
+    j.lista.itemDelegate().paint(pintor, opt, ix)
+    pintor.end()
+    return bytes(img.bits())
+
+
+# ---------- "digitando…" na linha da lista, com a conversa fechada
+chat_dig = {"remoteJid": FONE, "_jids": [FONE], "pushName": "Amigo", "unreadCount": 0,
+            "lastMessage": {"key": {"id": "z1", "fromMe": False, "remoteJid": FONE},
+                            "messageType": "conversation", "messageTimestamp": 1795000000,
+                            "message": {"conversation": "mensagem antiga"}}}
+j._todos = [chat_dig]
+j.msgs.jids = [GRUPO]  # conversa aberta é outra: a lista tem que mostrar sozinha
+antes_dig = render_linha(chat_dig)
+j.mostrar_presenca(FONE, "composing")
+assert (chat_dig.get("_digitando") or ("", 0))[0] == "digitando…", chat_dig.get("_digitando")
+depois_dig = render_linha(chat_dig)
+assert antes_dig != depois_dig, "a linha da lista não mostrou 'digitando…'"
+chat_dig["_digitando"] = None
+assert render_linha(chat_dig) == antes_dig, "a prévia não voltou depois do 'digitando…'"
+ok += 1
+print("ok  'digitando…' aparece na própria linha da lista, com a conversa fechada")
+
+# ---------- duplo clique na mensagem responde (Telegram Desktop)
+j.msgs.abrir(FONE, lote(3, de=300), 1)
+j.msgs.jids = [FONE]
+j._buscar_midia = lambda msg: None
+QTest.qWait(60)
+respondidas = []
+j.responder = lambda msg: respondidas.append(msg)
+retangulo = j.conversa.visualRect(j.msgs.index(1))
+assert retangulo.isValid() and not retangulo.isEmpty(), retangulo
+QTest.mouseDClick(j.conversa.viewport(), main.Qt.LeftButton, pos=retangulo.center())
+QTest.qWait(30)
+assert respondidas == [j.msgs.itens[1]], f"duplo clique não respondeu: {respondidas}"
+respondidas.clear()
+eco_local = j._eco_local(FONE, "provisória")
+ix_eco = j.msgs.index(j.msgs.itens.index(eco_local))
+QTest.mouseDClick(j.conversa.viewport(), main.Qt.LeftButton,
+                  pos=j.conversa.visualRect(ix_eco).center())
+QTest.qWait(30)
+assert not respondidas, "duplo clique respondeu a uma bolha provisória"
+ok += 1
+print("ok  duplo clique na mensagem responde; bolha provisória fica de fora")
+
+# ---------- grupo: a foto de cada participante na bolha
+original_midia = main.MIDIA
+
+
+class PoolImediato:
+    """MIDIA que roda na mesma thread — sem espera pelo pool no teste."""
+
+    @classmethod
+    def submit(cls, fn):
+        fn()
+
+
+main.MIDIA = PoolImediato
+pathtmp = api.CACHE / "autor-do-grupo.jpg"
+try:
+    j.api.avatar_file = lambda chat: pathtmp
+    no_grupo = {"key": {"id": "g2", "fromMe": False, "remoteJid": GRUPO, "participant": "88@lid"},
+                "pushName": "Fulano", "messageType": "conversation",
+                "messageTimestamp": 1795000900, "message": {"conversation": "oi"}}
+    j.msgs.abrir(GRUPO, [no_grupo], 1)
+    j.msgs.jids = [GRUPO]
+    j._buscar_midia = lambda msg: None
+    j._fotos_de_autores([no_grupo])
+    assert no_grupo.get("_foto_autor") == str(pathtmp), no_grupo.get("_foto_autor")
+    assert j._fotos_autor["88@lid"] == str(pathtmp)
+    j._fotos_de_autores([no_grupo])  # segunda mensagem do mesmo autor: sem novo pedido
+    assert no_grupo.get("_foto_autor") == str(pathtmp)
+finally:
+    main.MIDIA = original_midia
+ok += 1
+print("ok  grupo: a foto do participante chega na bolha e não é re-pedida")
+
+print(f"\n{ok}/34 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)

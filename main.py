@@ -983,21 +983,21 @@ class ItemChat(QStyledItemDelegate):
         p.drawPixmap(r.left() + self.PAD, r.top() + self.PAD, retrato)
 
         x = r.left() + self.PAD + self.LADO + self.PAD
-        direita = 64 if (naolidas or mudo or fixado) else 46
-        largura = max(60, r.width() - (x - r.left()) - direita)
+        direita = ESCALA.e(64) if (naolidas or mudo or fixado) else ESCALA.e(46)
+        largura = max(ESCALA.e(60), r.width() - (x - r.left()) - direita)
 
         # linha 1: nome + hora
         f_nome = fonte(opt.font, 0.5)
         p.setFont(f_nome)
         p.setPen(QColor(P["texto"]))
         p.drawText(
-            QRect(x, r.top() + 12, largura, 20), Qt.AlignLeft | Qt.AlignVCenter,
+            QRect(x, r.top() + ESCALA.e(12), largura, ESCALA.e(20)), Qt.AlignLeft | Qt.AlignVCenter,
             QFontMetrics(f_nome).elidedText(nome, Qt.ElideRight, largura),
         )
-        if ts and r.width() > 210:
+        if ts and r.width() > ESCALA.e(210):
             p.setFont(fonte(opt.font, -2.5))
             p.setPen(QColor(P["badge_texto"] if naolidas else P["fraco"]))
-            p.drawText(QRect(r.right() - 58, r.top() + 13, 50, 16), Qt.AlignRight, hora(ts))
+            p.drawText(QRect(r.right() - ESCALA.e(58), r.top() + ESCALA.e(13), ESCALA.e(50), ESCALA.e(16)), Qt.AlignRight, hora(ts))
 
         if andamento := ix.data(Qt.UserRole + 1):
             # enquanto carrega, a prévia dá lugar à barra — assim dá para
@@ -1023,7 +1023,12 @@ class ItemChat(QStyledItemDelegate):
             p.restore()
             return
 
-        # linha 2: ✓✓ Autor: prévia
+        # linha 2: ✓✓ Autor: prévia — ou "digitando…" em destaque enquanto durar
+        cor_previa = P["fraco"]
+        digitando = chat.get("_digitando")
+        if digitando and digitando[1] > datetime.now().timestamp():
+            marca, autor, corpo = "", "", digitando[0]
+            cor_previa = P["badge_texto"]
         f_previa = fonte(opt.font, -1)
         p.setFont(f_previa)
         metrica = QFontMetrics(f_previa)
@@ -1031,46 +1036,46 @@ class ItemChat(QStyledItemDelegate):
         limite = x + largura
         if marca:
             p.setPen(QColor(P["citacao"] if azul_marca else P["fraco"]))
-            p.drawText(QRect(cursor, r.top() + 36, 26, 18), Qt.AlignLeft | Qt.AlignVCenter, marca)
-            cursor += metrica.horizontalAdvance(marca) + 5
+            p.drawText(QRect(cursor, r.top() + ESCALA.e(36), ESCALA.e(26), ESCALA.e(18)), Qt.AlignLeft | Qt.AlignVCenter, marca)
+            cursor += metrica.horizontalAdvance(marca) + ESCALA.e(5)
         if autor:
             rotulo = f"{autor}: "
             p.setPen(QColor(P["fraco"]))
-            p.drawText(QRect(cursor, r.top() + 36, limite - cursor, 18),
+            p.drawText(QRect(cursor, r.top() + ESCALA.e(36), limite - cursor, ESCALA.e(18)),
                        Qt.AlignLeft | Qt.AlignVCenter, rotulo)
             cursor += metrica.horizontalAdvance(rotulo)
         if corpo and cursor < limite:
-            p.setPen(QColor(P["fraco"]))
+            p.setPen(QColor(cor_previa))
             p.drawText(
-                QRect(cursor, r.top() + 36, limite - cursor, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                QRect(cursor, r.top() + ESCALA.e(36), limite - cursor, ESCALA.e(18)), Qt.AlignLeft | Qt.AlignVCenter,
                 metrica.elidedText(corpo, Qt.ElideRight, limite - cursor),
             )
 
         # coluna da direita: sino cortado, contador, pino
-        dx = r.right() - 12
+        dx = r.right() - ESCALA.e(12)
         if naolidas:
             rotulo = "999+" if naolidas > 999 else str(naolidas)
             f_badge = fonte(opt.font, -2.5, negrito=True)
             p.setFont(f_badge)
-            w = max(20, QFontMetrics(f_badge).horizontalAdvance(rotulo) + 12)
-            pill = QRect(dx - w, r.top() + 38, w, 20)
+            w = max(ESCALA.e(20), QFontMetrics(f_badge).horizontalAdvance(rotulo) + ESCALA.e(12))
+            pill = QRect(dx - w, r.top() + ESCALA.e(38), w, ESCALA.e(20))
             # o verde puro sobre painel claro fica em 1.98 (o WhatsApp Web real
             # também) — um anel resolve o limite gráfico sem mexer na cor
             p.setPen(QPen(QColor(_mix(P["badge"], P["texto"], 0.35)), 1))
             p.setBrush(QColor(P["badge"]))
-            p.drawRoundedRect(pill, 10, 10)
+            p.drawRoundedRect(pill, pill.height() / 2, pill.height() / 2)
             p.setPen(QColor(P["sobre_badge"]))
             p.drawText(pill, Qt.AlignCenter, rotulo)
-            dx -= w + 6
+            dx -= w + ESCALA.e(6)
         if mudo:
             p.setFont(fonte(opt.font, -1))
             p.setPen(QColor(P["fraco"]))
-            p.drawText(QRect(dx - 20, r.top() + 38, 20, 20), Qt.AlignCenter, "🔕")
-            dx -= 24
+            p.drawText(QRect(dx - ESCALA.e(20), r.top() + ESCALA.e(38), ESCALA.e(20), ESCALA.e(20)), Qt.AlignCenter, "🔕")
+            dx -= ESCALA.e(24)
         if fixado:
             p.setFont(fonte(opt.font, -1))
             p.setPen(QColor(P["fraco"]))
-            p.drawText(QRect(dx - 18, r.top() + 38, 18, 20), Qt.AlignCenter, "📌")
+            p.drawText(QRect(dx - ESCALA.e(18), r.top() + ESCALA.e(38), ESCALA.e(18), ESCALA.e(20)), Qt.AlignCenter, "📌")
 
         p.setPen(QColor(P["divisor"]))
         p.drawLine(x, r.bottom(), r.right(), r.bottom())
@@ -1321,8 +1326,8 @@ class Balao(QStyledItemDelegate):
         cartao = self._cartao(det)
         alt_txt = larg_txt = alt_linha = 0
         mostra_texto = bool(texto) and cartao not in ("audio", "documento", "local", "contato")
-        if pix is not None and texto.strip() in ("🎬 Vídeo", "🖼 Imagem"):
-            mostra_texto = False
+        if pix is not None and texto.strip() in ("🎬 Vídeo", "🖼 Imagem", "🏷 Figurinha"):
+            mostra_texto = False  # o rótulo é para a prévia da lista, não para a bolha
         if mostra_texto:
             # com mídia, a legenda quebra na largura DELA — senão uma legenda de
             # uma linha estica a bolha e a miniatura estreita deixa um vazio
@@ -1343,10 +1348,12 @@ class Balao(QStyledItemDelegate):
         alt_rodape = m_rod.height()
 
         larg = max(larg_txt, min(pix.width(), util) if pix else 0)
+        larg_nome = 0
         if self._cabeca(ix, msg):
             # o nome pode ser mais largo que o conteúdo
-            larg = max(larg, min(util, QFontMetrics(fonte(opt.font, -0.5, negrito=True))
-                                 .horizontalAdvance(self._nome_autor(msg)) + ESCALA.e(24)))
+            larg_nome = min(util, QFontMetrics(fonte(opt.font, -0.5, negrito=True))
+                            .horizontalAdvance(self._nome_autor(msg)) + ESCALA.e(24))
+            larg = max(larg, larg_nome)
         # o WhatsApp põe a hora na mesma linha quando cabe — sem isto toda bolha
         # de uma linha fica ~50% mais alta do que precisa
         inline = (
@@ -1354,7 +1361,10 @@ class Balao(QStyledItemDelegate):
             and alt_txt <= alt_linha + 2 and larg_txt + larg_rodape <= util
         )
         if inline:
-            larg = larg_txt + larg_rodape
+            # a hora na mesma linha encolhe a bolha — mas não abaixo do nome do
+            # autor: nome comprido saía cortado ("Fulana de Tal Comprido" →
+            # "Fulana de Ta") quando a hora cabia na mesma linha do texto
+            larg = max(larg_txt + larg_rodape, larg_nome)
             alto = self.PAD_V * 2 + alt_txt
         else:
             alto = self.PAD_V * 2 + alt_txt + alt_rodape
@@ -5369,6 +5379,7 @@ class Janela(QMainWindow):
         # conversa fechada fica na memória por VALIDADE_CACHE e depois some.
         # Voltar em seguida é instantâneo; esquecer libera o heap.
         self._cache: dict[str, dict] = {}
+        self._fotos_autor: dict[str, str] = {}  # participante -> caminho ("" = pedido/sem foto)
         self._faxina = QTimer(self)
         self._faxina.timeout.connect(self._limpar_cache)
         self._faxina.start(ROTACAO_MS)
@@ -6581,6 +6592,7 @@ class Janela(QMainWindow):
         # Web: com não lidas, entra na MAIS ANTIGA delas e mostra o ↓ até o
         # usuário descer; sem não lidas, vai direto ao fim como sempre
         self._ancorar_naolidas(naolidas)
+        self._fotos_de_autores(self.msgs.itens)
         for m in registros:
             self._buscar_midia(m)
         # carga concluída (sucesso): a barra de progresso da linha some — antes
@@ -6624,6 +6636,7 @@ class Janela(QMainWindow):
         topo = self.conversa.indexAt(QPoint(0, 0))
         id_topo = (self.msgs.itens[topo.row()].get("key") or {}).get("id") if topo.isValid() else None
         self.msgs.anteriores(registros)
+        self._fotos_de_autores(registros)
         self.conversa.doItemsLayout()  # o layout do QListView é atrasado
         for i, m in enumerate(self.msgs.itens):
             if id_topo and (m.get("key") or {}).get("id") == id_topo:
@@ -6747,6 +6760,41 @@ class Janela(QMainWindow):
                     self.conversa.visualRect(self.msgs.index(i))
                 )
                 return
+
+    def _fotos_de_autores(self, msgs: list[dict]):
+        """Grupo: a foto de cada participante na bolha. Antes só iniciais —
+        `_foto_autor` era lido no paint e nunca preenchido."""
+        if not (self.msgs.jid or "").endswith("@g.us"):
+            return
+        pendentes = {}
+        for m in msgs:
+            chave = m.get("key") or {}
+            part = chave.get("participant") or ""
+            if not part or chave.get("fromMe"):
+                continue
+            if part in self._fotos_autor:
+                if self._fotos_autor[part]:
+                    m["_foto_autor"] = self._fotos_autor[part]
+            else:
+                pendentes[part] = chave.get("participantAlt") or ""
+        for part, alt in pendentes.items():
+            self._fotos_autor[part] = ""  # já pedido: não repete a cada mensagem
+
+            def trabalho(part=part, alt=alt):
+                caminho = self.api.avatar_file({"remoteJid": alt or part})
+                if not caminho and alt:
+                    caminho = self.api.avatar_file({"remoteJid": part})
+                if caminho:
+                    self._na_gui.emit(lambda: self._foto_de_autor_chegou(part, str(caminho)))
+
+            MIDIA.submit(trabalho)
+
+    def _foto_de_autor_chegou(self, part: str, caminho: str):
+        self._fotos_autor[part] = caminho
+        for m in self.msgs.itens:
+            if (m.get("key") or {}).get("participant") == part:
+                m["_foto_autor"] = caminho
+        self.conversa.viewport().update()
 
     def _midia_falhou(self, msg):
         msg.pop("_baixando", None)
@@ -7068,6 +7116,16 @@ class Janela(QMainWindow):
                 vp.setCursor(Qt.PointingHandCursor)
             elif vp.cursor().shape() == Qt.PointingHandCursor:
                 vp.unsetCursor()
+        if obj is self.conversa.viewport() and ev.type() == QEvent.MouseButtonDblClick \
+                and ev.button() == Qt.LeftButton:
+            # duplo clique na mensagem responde a ela (como no Telegram Desktop)
+            ix = self.conversa.indexAt(ev.position().toPoint())
+            msg = (item_de(ix) or {}) if ix.isValid() else {}
+            chave = msg.get("key") or {}
+            if chave.get("id") and not str(chave.get("id")).startswith("local-") \
+                    and not api.foi_apagada(msg):
+                self.responder(msg)
+                return True
         if obj is self.conversa.viewport() and ev.type() == QEvent.Resize:
             if getattr(self, "botao_descer", None) and self.botao_descer.isVisible():
                 self._mostrar_botao_descer()
@@ -7963,6 +8021,14 @@ class Janela(QMainWindow):
     def mostrar_presenca(self, jid: str, estado: str):
         """Presença no subtítulo, prioridade do Web: digitando/gravando somem
         em 6s; available vira 'online' persistente até unavailable/offline."""
+        # a linha da lista também mostra (como no Web), com a conversa fechada
+        na_lista = {"composing": "digitando…", "recording": "gravando áudio…"}.get(estado, "")
+        for c in self._todos:
+            if jid in (c.get("_jids") or [c.get("remoteJid")]):
+                c["_digitando"] = (na_lista, datetime.now().timestamp() + 6) if na_lista else None
+                self.chats.mudou(c)
+                QTimer.singleShot(6500, lambda c=c: self.chats.mudou(c))
+                break
         if jid not in (self.msgs.jids or [self.msgs.jid]):
             return
         efemero = {"composing": "digitando…", "recording": "gravando áudio…"}.get(estado)
@@ -8156,6 +8222,7 @@ class Janela(QMainWindow):
                 self.conversa.verticalScrollBar().maximum() - 40
             )
             self.msgs.chegou(msg)
+            self._fotos_de_autores([msg])
             self._buscar_midia(msg)
             self._ancorado = no_fim
             self._descer()
