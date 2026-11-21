@@ -1,0 +1,364 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["PySide6", "python-socketio[client]", "httpx", "psycopg[binary]"]
+# ///
+"""Mensagem em tempo real chegando na conversa certa.
+
+    QT_QPA_PLATFORM=offscreen uv run t_tempo_real.py
+
+Existe porque mensagem recebida aparecia só na prévia da lista e não na
+conversa: desde a migração para @lid toda 1:1 chega como `x@lid` com o número
+em `remoteJidAlt`, e a conversa aberta pelo número não casava. E porque a
+conversa guardada em memória era restaurada sem o que chegou com ela fechada.
+Host apontado para porta morta: nada sai para a rede.
+"""
+
+import pathlib
+import sys
+
+from PySide6.QtWidgets import QApplication
+
+app = QApplication([])
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+import api  # noqa: E402
+import main  # noqa: E402
+
+import tempfile  # noqa: E402
+
+api.CACHE = pathlib.Path(tempfile.mkdtemp(prefix="t_tempo_real_"))  # nada no ~/.cache real
+main.ANIMA = main.Animador()
+cfg = dict(api.load_config(), host="http://127.0.0.1:9", notificar=False)
+j = main.Janela(cfg)
+FONE, LID = "5581999990000@s.whatsapp.net", "99999999999@lid"
+ok = 0
+
+
+def chega(mid, texto, de_mim=False, alt=True, jid=LID):
+    chave = {"id": mid, "fromMe": de_mim, "remoteJid": jid}
+    if alt:
+        chave["remoteJidAlt"] = FONE
+    j.mensagem_recebida({"key": chave, "messageType": "conversation",
+                         "messageTimestamp": 1795000000, "message": {"conversation": texto}})
+
+
+def ids():
+    return [(m.get("key") or {}).get("id") for m in j.msgs.itens]
+
+
+# conversa conhecida só pelo número, aberta
+j._todos = [{"remoteJid": FONE, "_jids": [FONE], "pushName": "Amigo", "unreadCount": 0}]
+j.msgs.abrir(FONE, [], 1)
+j.msgs.jids = [FONE]
+
+# 1. chega pelo @lid: entra na conversa e não duplica a linha
+chega("m1", "oi")
+assert "m1" in ids(), "mensagem pelo @lid não entrou na conversa aberta pelo número"
+assert len(j._todos) == 1, f"linha duplicada na lista: {len(j._todos)}"
+assert LID in j._todos[0]["_jids"] and LID in j.msgs.jids
+ok += 1
+print("ok  @lid entra na conversa aberta pelo número, sem linha duplicada")
+
+# 2. eco do meu envio volta como @lid: a bolha pendente adota, não duplica
+j._eco_local(FONE, "tudo bem?")
+j.mensagem_recebida({"key": {"id": "m2", "fromMe": True, "remoteJid": LID, "remoteJidAlt": FONE},
+                     "messageType": "conversation", "messageTimestamp": 1795000000,
+                     "status": "PENDING", "message": {"conversation": "tudo bem?"}})
+assert ids().count("m2") == 1 and not any(str(x).startswith("local-") for x in ids()), ids()
+# o eco vem PENDING e a Evolution não manda update de SERVER_ACK: 🕐 eterno
+assert j.msgs.itens[ids().index("m2")]["status"] == "SERVER_ACK"
+# e o retorno do POST (também PENDING) não pode rebaixar o que o socket trouxe
+eco = j.msgs.itens[ids().index("m2")]
+eco["status"] = "DELIVERY_ACK"
+j.api.send_text = lambda *a, **k: {"key": eco["key"], "status": "PENDING"}
+j._enviar_texto(FONE, "tudo bem?", None, eco)  # _na_gui na mesma thread: direto
+assert eco["status"] == "DELIVERY_ACK", eco["status"]
+ok += 1
+print("ok  eco do envio pelo @lid adota a bolha pendente")
+
+# 3. edição chega: a bolha muda de texto
+j.mensagem_recebida({"key": {"id": "e1", "remoteJid": LID, "remoteJidAlt": FONE},
+                     "messageType": "protocolMessage", "message": {"protocolMessage": {
+                         "type": 14, "key": {"id": "m1"}, "editedMessage": {"conversation": "olá"}}}})
+assert api.text_of(j.msgs.itens[ids().index("m1")]) == "olá" and "e1" not in ids()
+ok += 1
+print("ok  edição recebida troca o texto da bolha")
+
+# 4. sai da conversa, chega mensagem, volta: a cópia em memória não pode ficar velha
+j._guardar_no_cache()
+assert FONE in j._cache
+j.msgs.abrir("outro@s.whatsapp.net", [], 1)
+j.msgs.jids = ["outro@s.whatsapp.net"]
+chega("m3", "tá aí?")
+assert FONE not in j._cache, "conversa guardada sem a mensagem nova seria restaurada"
+assert j._todos[0]["unreadCount"] == 1
+ok += 1
+print("ok  mensagem com a conversa fechada invalida a cópia em memória")
+
+# 5. queda do socket esquece tudo que estava guardado
+j._cache["x"] = {"itens": [], "jids": ["x"], "pagina": 1, "paginas": 1, "saiu_em": None}
+j.mostrar_conexao("caiu")
+assert not j._cache
+ok += 1
+print("ok  queda do socket esvazia as conversas guardadas")
+
+# 6. duas linhas do mesmo contato, aberta a do número; chega
+#    pelo @lid -> as linhas se fundem e a conversa recebe a mensagem
+j._todos = [
+    {"remoteJid": FONE, "_jids": [FONE], "pushName": "Carla", "unreadCount": 0},
+    {"remoteJid": LID, "_jids": [LID], "unreadCount": 2},
+]
+j.msgs.abrir(FONE, [], 1)
+j.msgs.jids = [FONE]
+chega("b1", "chegou agora")
+assert "b1" in ids(), "contato partido: mensagem não entrou na conversa"
+assert len(j._todos) == 1 and set(j._todos[0]["_jids"]) == {FONE, LID}, j._todos
+ok += 1
+print("ok  contato partido em duas linhas se funde quando a mensagem chega")
+
+# 7. mensagem que chega enquanto a conversa carrega não some quando a carga
+#    termina; e carga de conversa que já não está aberta é descartada
+velha = {"key": {"id": "v1", "remoteJid": FONE}, "messageType": "conversation",
+         "messageTimestamp": 1794000000, "message": {"conversation": "antiga"}}
+j._pintar_conversa(FONE, [velha], 1)
+assert ids() == ["v1", "b1"], ids()
+j._pintar_conversa("outro@s.whatsapp.net", [], 1)
+assert ids() == ["v1", "b1"], "carga atrasada de outra conversa pintou por cima"
+ok += 1
+print("ok  carga da conversa preserva o que chegou no meio e ignora carga atrasada")
+
+# 8. mapa aprendido: minha mensagem pelo @lid (sem Alt) acha a linha do número
+api.LIDS[LID] = FONE
+j._todos = [{"remoteJid": FONE, "_jids": [FONE], "unreadCount": 0}]
+chega("b2", "já vou", de_mim=True, alt=False)
+assert len(j._todos) == 1 and LID in j._todos[0]["_jids"]
+ok += 1
+print("ok  mensagem minha pelo @lid sem Alt acha o contato pelo mapa aprendido")
+
+# ---------- rolagem ao abrir: no fim, sem paginar sozinha
+from PySide6.QtCore import QPoint  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+
+pedidas = []
+j.api.messages = lambda *a, **k: (pedidas.append(a), ([], 1))[1]
+j.resize(1100, 720)
+j.show()
+
+
+def lote(n, de=0, base=1795000000):
+    return [{"key": {"id": f"h{i}", "fromMe": i % 3 == 0, "remoteJid": FONE},
+             "messageType": "conversation", "messageTimestamp": base + i * 60,
+             "message": {"conversation": f"mensagem {i}"}} for i in range(de + n - 1, de - 1, -1)]
+
+
+def abre(unread):
+    j._todos = [{"remoteJid": FONE, "_jids": [FONE], "unreadCount": unread}]
+    j.msgs.jids = [FONE]
+    j.conversa.verticalScrollBar().setValue(0)
+    j._pintar_conversa(FONE, lote(150, de=50), 5)
+    QTest.qWait(400)
+
+
+barra = j.conversa.verticalScrollBar()
+abre(0)
+assert barra.value() >= barra.maximum() - 40, f"abriu longe do fim: {barra.value()}/{barra.maximum()}"
+assert not pedidas, f"abrir pediu página antiga sozinho: {pedidas}"
+ok += 1
+print("ok  sem não lidas: abre no fim e não pagina sozinho")
+
+# status vem vazio da API: só as últimas `unreadCount` recebidas são não lidas
+abre(3)
+topo = j.conversa.indexAt(QPoint(0, 0)).row()
+assert topo >= 140, f"âncora de não lidas foi para a linha {topo} (dias atrás)"
+ok += 1
+print("ok  com 3 não lidas: âncora na mais antiga delas, não no começo da janela")
+
+# carregar a página anterior não pode empurrar a tela
+barra.setValue(0)
+QTest.qWait(50)
+antes = j.msgs.itens[j.conversa.indexAt(QPoint(0, 0)).row()]
+j._pintar_pagina(FONE, lote(50, de=0))
+QTest.qWait(100)
+depois = j.msgs.itens[j.conversa.indexAt(QPoint(0, 0)).row()]
+assert depois is antes, f"tela pulou: topo era {antes['key']['id']}, virou {depois['key']['id']}"
+ok += 1
+print("ok  página antiga entra acima sem mexer no que está na tela")
+
+# ação do menu (editar/reagir/apagar) precisa do item DE VERDADE: o
+# data(UserRole) do PySide devolve cópia e a bolha não atualizava
+assert main.item_de(j.msgs.index(0)) is j.msgs.itens[0]
+ok += 1
+print("ok  item_de devolve o item do modelo, não a cópia do PySide")
+
+# ---------- botão direito e visualizador: o direito é menu, não "abrir";
+# e o menu do visualizador precisa nascer nele (Wayland ancora popup no pai)
+from PySide6.QtCore import QPointF, QEvent  # noqa: E402
+from PySide6.QtGui import QImage, QMouseEvent, QColor  # noqa: E402
+
+jpg = api.CACHE / "foto.jpg"
+img = QImage(320, 240, QImage.Format_RGB32)
+img.fill(QColor("#3a7"))
+img.save(str(jpg))
+foto = {"key": {"id": "f1", "fromMe": False, "remoteJid": FONE}, "messageType": "imageMessage",
+        "messageTimestamp": 1795000500, "message": {"imageMessage": {"width": 320, "height": 240}},
+        "_arquivo": str(jpg)}
+j.msgs.abrir(FONE, [foto], 1)
+j.msgs.jids = [FONE]
+QTest.qWait(100)
+ix = j.msgs.index(0)
+delegado, caixa, y, pix, _ = j._geometria(ix, foto)
+alvo = QPointF(delegado._area_midia(caixa, y, pix).center())
+abertos = []
+j.abrir_anexo = lambda m: abertos.append(m)
+
+
+def aperta(botao):
+    ev = QMouseEvent(QEvent.MouseButtonPress, alvo, alvo, botao, botao, main.Qt.NoModifier)
+    return j.eventFilter(j.conversa.viewport(), ev)
+
+
+assert not aperta(main.Qt.RightButton), "botão direito foi consumido como clique"
+QTest.qWait(50)
+assert not abertos, "botão direito abriu o visualizador"
+assert aperta(main.Qt.LeftButton)
+QTest.qWait(50)
+assert abertos, "botão esquerdo deixou de abrir a mídia"
+ok += 1
+print("ok  botão direito na imagem não abre o visualizador; o esquerdo abre")
+
+v = main.Visualizador([foto], 0, "Carla", j, menu_de=j.menu_para_mensagem)
+v.show()
+QTest.qWait(50)
+pais = []
+
+
+def fabrica(msg, **kw):  # o menu de verdade, só sem o exec() que bloquearia
+    menu = j.menu_para_mensagem(msg, **kw)
+    menu.exec = lambda *a: pais.append(menu.parentWidget())
+    return menu
+
+
+v.menu_de = fabrica
+v._menu(v.mais.mapToGlobal(v.mais.rect().bottomLeft()))
+v.menu_de = j.menu_para_mensagem
+assert pais and pais[0] is v, f"menu do visualizador ancorado em {pais}"
+ok += 1
+print("ok  ⋮ e clique direito do visualizador ancoram o menu nele (Wayland)")
+
+assert v.copiar.isVisible()
+QApplication.clipboard().clear()
+v.copiar.click()
+copiada = QApplication.clipboard().image()
+assert not copiada.isNull() and copiada.width() == 320, "⧉ não copiou a imagem"
+assert v.copiar.text() == "✓"
+ok += 1
+print("ok  ⧉ copia a imagem para a área de transferência")
+v.close()
+
+# popup de emoji/GIF: contido na própria janela, nunca medido pela tela
+# (Wayland não diz onde a janela está; com vários monitores o primário pode ser o errado)
+from PySide6.QtCore import QRect  # noqa: E402
+from PySide6.QtWidgets import QWidget  # noqa: E402
+
+pop = QWidget(j, main.Qt.Popup)
+pop.resize(420, 380)
+j._sobre_o_campo(pop)
+caixa = QRect(j.mapToGlobal(main.QPoint(0, 0)), j.size())
+assert caixa.contains(QRect(pop.pos(), pop.size())), f"popup fora da janela: {pop.pos()} em {caixa}"
+pop.deleteLater()
+ok += 1
+print("ok  popup de emoji/GIF fica dentro da própria janela")
+
+# ---------- velocidade NA BOLHA, como no WhatsApp Web
+wav = api.CACHE / "voz.ogg"
+wav.write_bytes(b"0" * 2048)
+voz = {"key": {"id": "a1", "fromMe": False, "remoteJid": FONE}, "messageType": "audioMessage",
+       "messageTimestamp": 1795000600, "message": {"audioMessage": {"seconds": 9, "ptt": True}},
+       "_arquivo": str(wav)}
+j.msgs.abrir(FONE, [voz], 1)
+j.msgs.jids = [FONE]
+QTest.qWait(100)
+delegado, caixa, y, _, _ = j._geometria(j.msgs.index(0), voz)
+_b, _o, retrato = delegado.geometria_audio(caixa, y)
+no_retrato = QPointF(retrato.center())
+main.AUDIO.velocidade = 1.0
+assert not j._clique_audio(j.msgs.index(0), no_retrato.toPoint(), voz) or main.AUDIO.velocidade == 1.0, \
+    "áudio parado: o retrato não é botão de velocidade"
+main.AUDIO.em_curso = lambda mid: mid == "a1"  # tocando, sem sair som do teste
+assert j._clique_audio(j.msgs.index(0), no_retrato.toPoint(), voz)
+assert main.AUDIO.velocidade == 1.5 and main.AUDIO.rotulo_velocidade() == "1,5×"
+j._clique_audio(j.msgs.index(0), no_retrato.toPoint(), voz)
+j._clique_audio(j.msgs.index(0), no_retrato.toPoint(), voz)
+assert main.AUDIO.velocidade == 1.0, "1× → 1,5× → 2× → 1×"
+del main.AUDIO.em_curso
+ok += 1
+print("ok  pílula de velocidade na bolha em curso: 1× → 1,5× → 2× → 1×")
+
+# ---------- gravação no lugar do campo: onda, cancelar, pausar/retomar, enviar
+from PySide6.QtCore import QObject, Signal  # noqa: E402
+
+
+class GravadorFalso(QObject):  # o de verdade abriria o microfone
+    pronto = Signal(pathlib.Path)
+    nivel = Signal(float)
+
+    def __init__(self):
+        super().__init__()
+        self.estado, self.log = "parado", []
+
+    def iniciar(self): self.estado = "gravando"; self.log.append("iniciar")
+    def gravando(self): return self.estado != "parado"
+    def pausado(self): return self.estado == "pausado"
+    def pausar(self): self.estado = "pausado"; self.log.append("pausar")
+    def retomar(self): self.estado = "gravando"; self.log.append("retomar")
+    def parar(self): self.estado = "parado"; self.log.append("parar")
+    def cancelar(self): self.estado = "parado"; self.log.append("cancelar")
+    def duracao(self): return 7000
+
+
+g = GravadorFalso()
+j._gravador = g
+j._gravador.pronto.connect(j._ptt_pronto)
+enviados = []
+j.api.send_audio = lambda jid, arq: enviados.append((jid, arq))
+j.api.presenca = lambda *a, **k: None
+j._tentar = lambda fn, *a: fn(*a)
+
+j.alternar_ptt()
+barra = j._barra_gravacao
+assert not barra.isHidden() and j.campo.isHidden() and j.b_mic.isHidden(), "campo não virou gravação"
+assert barra.tempo.text() == "0:07"
+for v in (0.1, 0.8, 0.3):
+    g.nivel.emit(v)
+assert list(barra.picos) == [0.1, 0.8, 0.3], "onda não recebe o nível do microfone"
+barra.b_pausa.click()
+assert g.pausado() and barra.b_pausa.text() == "🎤", "⏸ não virou 🎤 (retomar)"
+g.nivel.emit(0.9)
+assert len(barra.picos) == 3, "pausado, a onda não anda"
+barra.b_pausa.click()
+assert not g.pausado() and barra.b_pausa.text() == "⏸"
+barra.cancelar.emit()
+assert g.log[-1] == "cancelar" and not j.campo.isHidden() and barra.isHidden()
+g.pronto.emit(pathlib.Path("/tmp/x.wav"))
+QTest.qWait(50)
+assert not enviados, "cancelado não pode enviar"
+
+j.alternar_ptt()  # de novo, e troca de conversa no meio
+j.msgs.jids = ["outro@s.whatsapp.net"]
+j.msgs.jid = "outro@s.whatsapp.net"
+barra.enviar.emit()
+g.pronto.emit(pathlib.Path("/tmp/y.wav"))
+# o envio roda numa thread do POOL: QTest.qWait segura o GIL no PySide6 e a
+# thread mal anda — espera liberando o GIL, com prazo
+import time  # noqa: E402
+
+prazo = time.time() + 5
+while not enviados and time.time() < prazo:
+    QApplication.processEvents()
+    time.sleep(0.01)
+assert enviados and enviados[0][0] == FONE, f"áudio foi para {enviados}"
+assert not j.campo.isHidden() and barra.isHidden()
+ok += 1
+print("ok  gravação no lugar do campo: onda, ⏸↔🎤, 🗑 descarta, ➤ vai para quem começou")
+
+print(f"\n{ok}/18 passaram")
+main.POOL.shutdown(wait=False, cancel_futures=True)

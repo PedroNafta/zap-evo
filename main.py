@@ -12,12 +12,14 @@ Config em ~/.config/evolution-client/config.toml (criada no primeiro uso).
 from __future__ import annotations
 
 import base64
+import faulthandler
 import logging
 import math
 import os
 import pathlib
 import shutil
 import sys
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import lru_cache
@@ -27,8 +29,10 @@ import unicodedata
 import shiboken6
 import socketio
 from PySide6.QtMultimedia import (
+    QAudioFormat,
     QAudioInput,
     QAudioOutput,
+    QAudioSource,
     QCamera,
     QImageCapture,
     QMediaCaptureSession,
@@ -166,6 +170,17 @@ def hora(ts: int) -> str:
 
 
 # --------------------------------------------------------------------------- modelos
+
+
+def item_de(ix):
+    """O item DE VERDADE da linha. `ix.data(Qt.UserRole)` no PySide devolve
+    CÓPIA (dict -> QVariantMap -> dict): editar/reagir/apagar mexiam na cópia,
+    o `mudou(msg)` (que procura por identidade) não achava nada e a bolha só
+    atualizava ao reabrir. E o delegate copiava cada mensagem a cada pintura."""
+    if not ix.isValid():
+        return None
+    itens = getattr(ix.model(), "itens", None)
+    return itens[ix.row()] if itens is not None else ix.data(Qt.UserRole)
 
 
 class ChatList(QAbstractListModel):
@@ -866,7 +881,7 @@ class ItemChat(QStyledItemDelegate):
         return QSize(0, self.ALTURA)
 
     def paint(self, p, opt, ix):
-        chat = ix.data(Qt.UserRole) or {}
+        chat = item_de(ix) or {}
         nome = ix.data(Qt.DisplayRole) or ""
         jid = chat.get("remoteJid", "")
         naolidas = int(chat.get("unreadCount") or 0)
@@ -1045,7 +1060,8 @@ def citacao_de(msg: dict) -> tuple[str, str, str] | None:
         autor = (
             (ctx.get("quotedPushName") or "").strip()
             or (CONTATOS.get(bruto) or "").strip()
-            or api.formatar_numero(bruto)
+            or (CONTATOS.get(api.LIDS.get(bruto, "")) or "").strip()
+            or api.formatar_numero(api.LIDS.get(bruto) or bruto)
         )
 
     sub = citada.get(tipo)
@@ -1157,14 +1173,14 @@ class Balao(QStyledItemDelegate):
         """Anterior do mesmo autor, no mesmo dia, a menos de 5 min."""
         if ix.row() == 0 or self._vira_o_dia(ix):
             return False
-        atual = ix.data(Qt.UserRole) or {}
-        antes = ix.model().index(ix.row() - 1).data(Qt.UserRole) or {}
+        atual = item_de(ix) or {}
+        antes = item_de(ix.model().index(ix.row() - 1)) or {}
         if self._autor_de(atual) != self._autor_de(antes):
             return False
         return 0 <= atual.get("messageTimestamp", 0) - antes.get("messageTimestamp", 0) <= 300
 
     def _dados(self, ix, total):
-        msg = ix.data(Qt.UserRole) or {}
+        msg = item_de(ix) or {}
         texto = api.text_of(msg)
         if api.foi_apagada(msg):
             texto = "🚫  " + texto  # medido junto, senao a bolha corta o rotulo
@@ -1207,11 +1223,11 @@ class Balao(QStyledItemDelegate):
 
     def _vira_o_dia(self, ix) -> str:
         modelo = ix.model()
-        atual = datetime.fromtimestamp((ix.data(Qt.UserRole) or {}).get("messageTimestamp", 0))
+        atual = datetime.fromtimestamp((item_de(ix) or {}).get("messageTimestamp", 0))
         if ix.row() == 0:
             return atual.strftime("%d/%m/%Y")
         antes = datetime.fromtimestamp(
-            (modelo.index(ix.row() - 1).data(Qt.UserRole) or {}).get("messageTimestamp", 0)
+            (item_de(modelo.index(ix.row() - 1)) or {}).get("messageTimestamp", 0)
         )
         return atual.strftime("%d/%m/%Y") if atual.date() != antes.date() else ""
 
@@ -1407,7 +1423,12 @@ class Balao(QStyledItemDelegate):
 
     def _retrato_de_voz(self, p, r: QRect, msg: dict, meu: bool, det: dict):
         """Foto de quem gravou, à direita do cartão, com o selo de microfone —
-        é o que o WhatsApp Web mostra em nota de voz."""
+        é o que o WhatsApp Web mostra em nota de voz. Com o áudio em curso, o
+        lugar da foto vira a pílula de velocidade (1× / 1,5× / 2×), também
+        como no Web: o controle fica onde a pessoa está olhando."""
+        if AUDIO and AUDIO.em_curso((msg.get("key") or {}).get("id", "")):
+            self._pilula_velocidade(p, r)
+            return
         if meu:
             nome, jid, caminho = self.eu
         elif self._em_grupo(msg):
@@ -1432,6 +1453,21 @@ class Balao(QStyledItemDelegate):
         f.setPixelSize(max(8, int(lado * 0.62)))
         p.setFont(f)
         p.drawText(selo, Qt.AlignCenter, "🎤")
+
+    @staticmethod
+    def _pilula_velocidade(p, r: QRect):
+        alt = max(ESCALA.e(20), r.height() * 2 // 3)
+        pilula = QRect(r.left() - ESCALA.e(4), r.center().y() - alt // 2,
+                       r.width() + ESCALA.e(8), alt)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(P["accent"]))
+        p.drawRoundedRect(pilula, alt / 2, alt / 2)
+        f = QFont()
+        f.setPixelSize(max(9, int(alt * 0.55)))
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(pilula, Qt.AlignCenter, AUDIO.rotulo_velocidade())
 
     @staticmethod
     def _selo_hd(p, area: QRect):
@@ -2003,7 +2039,7 @@ class SeletorEmoji(QDialog):
         self.modelo.definir(itens)
 
     def _escolher(self, ix):
-        e = ix.data(Qt.UserRole)
+        e = item_de(ix)
         if not e:
             return
         char = e[0]
@@ -2087,7 +2123,7 @@ class GifDelegate(QStyledItemDelegate):
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(P["divisor"]))
         p.drawRoundedRect(c, 4, 4)
-        it = ix.data(Qt.UserRole) or {}
+        it = item_de(ix) or {}
         mv = it.get("_mv")
         pix: QPixmap | None = mv.currentPixmap() if mv is not None else it.get("_pix")
         if pix is not None and not pix.isNull():
@@ -2260,7 +2296,7 @@ class SeletorGif(QDialog):
         self.modelo.preview_pronto(gid, caminho)
 
     def _escolher(self, ix):
-        it = ix.data(Qt.UserRole)
+        it = item_de(ix)
         if it:
             self.escolhido.emit(it)
             self.close()
@@ -2526,6 +2562,16 @@ class AudioInline(QObject):
         self._seek_pendente = None
         self.mudou.emit()
 
+    def em_curso(self, mid: str) -> bool:
+        """Tocando ou pausado no meio — terminado não conta (o Web volta a
+        mostrar a foto no lugar da pílula de velocidade)."""
+        return bool(mid) and self.mid == mid and (
+            self.player.playbackState() != QMediaPlayer.StoppedState
+        )
+
+    def rotulo_velocidade(self) -> str:
+        return f"{self.velocidade:g}×".replace(".", ",")
+
     def trocar_velocidade(self) -> float:
         self.velocidade = {1.0: 1.5, 1.5: 2.0, 2.0: 1.0}[self.velocidade]
         self.player.setPlaybackRate(self.velocidade)
@@ -2551,7 +2597,7 @@ class MiniPlayer(QWidget):
         self.barra.setFixedHeight(4)
         self.b_vel = QPushButton("1×")
         self.b_vel.setFixedWidth(34)
-        self.b_vel.clicked.connect(lambda: self.b_vel.setText(f"{audio.trocar_velocidade():g}×"))
+        self.b_vel.clicked.connect(audio.trocar_velocidade)
         fechar = QPushButton("✕")
         fechar.setFixedWidth(28)
         fechar.clicked.connect(audio.parar)
@@ -2584,6 +2630,7 @@ class MiniPlayer(QWidget):
         )
 
     def atualizar(self):
+        self.b_vel.setText(self.audio.rotulo_velocidade())  # a bolha também troca
         if not self.audio.mid:
             self.setVisible(False)
             return
@@ -2604,9 +2651,15 @@ class MiniPlayer(QWidget):
 
 
 class Gravador(QObject):
-    """PTT. Grava WAV — a Evolution converte para ogg/opus sozinha (verificado)."""
+    """PTT. Grava WAV — a Evolution converte para ogg/opus sozinha (verificado).
+
+    Pausar/retomar é do próprio QMediaRecorder. O nível do microfone, para a
+    onda ao vivo, vem de um QAudioSource em paralelo: o recorder não expõe
+    amostras, e o PipeWire serve duas capturas do mesmo microfone.
+    """
 
     pronto = Signal(pathlib.Path)
+    nivel = Signal(float)  # pico 0..1 de cada leitura, para a onda ao vivo
 
     def __init__(self, pai=None):
         super().__init__(pai)
@@ -2620,19 +2673,67 @@ class Gravador(QObject):
         self.rec.setMediaFormat(formato)
         self.rec.setQuality(QMediaRecorder.HighQuality)
         self.destino: pathlib.Path | None = None
+        self._descartar = False
+        self._fonte: QAudioSource | None = None
+        self._io = None
         self.rec.recorderStateChanged.connect(self._estado)
 
     def gravando(self) -> bool:
-        return self.rec.recorderState() == QMediaRecorder.RecordingState
+        """Sessão aberta: gravando OU pausada (o ⏸ não encerra a gravação)."""
+        return self.rec.recorderState() != QMediaRecorder.StoppedState
+
+    def pausado(self) -> bool:
+        return self.rec.recorderState() == QMediaRecorder.PausedState
 
     def iniciar(self):
+        self._descartar = False
         self.destino = api.MEDIA / f"ptt-{datetime.now():%Y%m%d-%H%M%S}.wav"
         self.rec.setOutputLocation(QUrl.fromLocalFile(str(self.destino)))
         self.rec.record()
+        self._medidor(True)
+
+    def pausar(self):
+        self.rec.pause()
+        if self._fonte:
+            self._fonte.suspend()
+
+    def retomar(self):
+        self.rec.record()  # do PausedState, record() continua o mesmo arquivo
+        if self._fonte:
+            self._fonte.resume()
 
     def parar(self):
         if self.gravando():
             self.rec.stop()
+        self._medidor(False)
+
+    def cancelar(self):
+        """🗑: encerra e joga o arquivo fora — nada é enviado."""
+        self._descartar = True
+        self.parar()
+
+    def _medidor(self, ligar: bool):
+        if self._fonte:
+            self._fonte.stop()
+            self._fonte.deleteLater()
+            self._fonte = self._io = None
+        if not ligar:
+            return
+        fmt = QAudioFormat()
+        fmt.setSampleRate(16000)
+        fmt.setChannelCount(1)
+        fmt.setSampleFormat(QAudioFormat.Int16)
+        self._fonte = QAudioSource(QMediaDevices.defaultAudioInput(), fmt, self)
+        self._io = self._fonte.start()
+        if self._io:  # sem microfone a gravação segue, só sem onda
+            self._io.readyRead.connect(self._ler_nivel)
+
+    def _ler_nivel(self):
+        dados = bytes(self._io.readAll()) if self._io else b""
+        if len(dados) < 2:
+            return
+        amostras = memoryview(dados[: len(dados) // 2 * 2]).cast("h")
+        self.nivel.emit(min(1.0, max(abs(min(amostras)), max(amostras)) / 32768))
 
     def _estado(self, estado):
         if estado == QMediaRecorder.StoppedState and self.destino:
@@ -2640,12 +2741,119 @@ class Gravador(QObject):
             QTimer.singleShot(350, lambda: self._entregar(alvo))
 
     def _entregar(self, alvo: pathlib.Path):
-        if alvo.exists() and alvo.stat().st_size > 1024:
+        if self._descartar:
+            alvo.unlink(missing_ok=True)
+        elif alvo.exists() and alvo.stat().st_size > 1024:
             self.pronto.emit(alvo)
         self.destino = None
 
     def duracao(self) -> int:
         return self.rec.duration()
+
+
+class _OndaAoVivo(QWidget):
+    """Barras do nível do microfone, a mais nova à direita (como no Web)."""
+
+    def __init__(self, picos: deque, pai=None):
+        super().__init__(pai)
+        self.picos = picos
+        self.pausada = False
+        self.setMinimumHeight(ESCALA.e(28))
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(P["fraco"] if self.pausada else P["accent"]))
+        larg, vao = ESCALA.e(3), ESCALA.e(2)
+        meio, alt = self.height() / 2, self.height() - 4
+        x = self.width() - larg
+        for v in reversed(self.picos):
+            if x < 0:
+                break
+            h = max(2.0, alt * min(1.0, v ** 0.5))  # raiz: voz baixa ainda aparece
+            p.drawRoundedRect(QRectF(x, meio - h / 2, larg, h), 1.5, 1.5)
+            x -= larg + vao
+        p.end()
+
+
+class BarraGravacao(QWidget):
+    """O campo de texto VIRA a gravação, como no WhatsApp Web:
+    🗑 cancelar · ● tempo · onda ao vivo · ⏸ pausar ↔ ⏺ retomar · ➤ enviar.
+
+    Antes era um "● gravando 5s" na barra de status — o feedback essencial da
+    ação longe dela."""
+
+    cancelar = Signal()
+    enviar = Signal()
+
+    def __init__(self, gravador: "Gravador", pai=None):
+        super().__init__(pai)
+        self.gravador = gravador
+        self.picos: deque = deque(maxlen=200)
+        lixo = QPushButton("🗑")
+        lixo.setFixedWidth(40)
+        lixo.setToolTip("Cancelar — o áudio é descartado")
+        lixo.clicked.connect(self.cancelar)
+        self.ponto = QLabel("●")
+        self.tempo = QLabel("0:00")
+        self.onda = _OndaAoVivo(self.picos)
+        self.b_pausa = QPushButton("⏸")
+        self.b_pausa.setFixedWidth(40)
+        self.b_pausa.setToolTip("Pausar gravação")
+        self.b_pausa.clicked.connect(self._pausa)
+        envia = QPushButton("➤")
+        envia.setFixedWidth(40)
+        envia.setToolTip("Enviar áudio")
+        envia.clicked.connect(self.enviar)
+        linha = QHBoxLayout(self)
+        linha.setContentsMargins(0, 0, 0, 0)
+        linha.setSpacing(8)
+        for w in (lixo, self.ponto, self.tempo):
+            linha.addWidget(w)
+        linha.addWidget(self.onda, 1)
+        linha.addWidget(self.b_pausa)
+        linha.addWidget(envia)
+        gravador.nivel.connect(self._pico)
+        self.relogio = QTimer(self)
+        self.relogio.timeout.connect(self._tic)
+        self._piscar = False
+
+    def comecar(self):
+        self.picos.clear()
+        self.b_pausa.setText("⏸")
+        self.b_pausa.setToolTip("Pausar gravação")
+        self.onda.pausada = False
+        self._tic()
+        self.relogio.start(250)
+
+    def parar(self):
+        self.relogio.stop()
+
+    def _pausa(self):
+        if self.gravador.pausado():
+            self.gravador.retomar()
+            self.b_pausa.setText("⏸")
+            self.b_pausa.setToolTip("Pausar gravação")
+        else:
+            self.gravador.pausar()
+            self.b_pausa.setText("🎤")  # retomar = o microfone, como no Web
+            self.b_pausa.setToolTip("Retomar gravação")
+        self.onda.pausada = self.gravador.pausado()
+        self.onda.update()
+        self._tic()
+
+    def _pico(self, v: float):
+        if not self.gravador.pausado():
+            self.picos.append(v)
+            self.onda.update()
+
+    def _tic(self):
+        seg = max(0, self.gravador.duracao()) // 1000
+        self.tempo.setText(f"{seg // 60}:{seg % 60:02d}")
+        self._piscar = not self._piscar and not self.gravador.pausado()
+        cor = P["fraco"] if self.gravador.pausado() else ("#e5484d" if self._piscar else P["fraco"])
+        self.ponto.setStyleSheet(f"color:{cor}; background:transparent;")
 
 
 class DialogoCamera(QDialog):
@@ -2951,6 +3159,10 @@ class Visualizador(QDialog):
         self.favoritar.setFixedWidth(30)
         self.favoritar.setToolTip("Favoritar")
         self.favoritar.clicked.connect(lambda: self._disparar("☆", "★"))
+        self.copiar = QPushButton("⧉")
+        self.copiar.setFixedWidth(30)
+        self.copiar.setToolTip("Copiar imagem")
+        self.copiar.clicked.connect(self._copiar)
         self.encaminhar = QPushButton("➦")
         self.encaminhar.setFixedWidth(30)
         self.encaminhar.setToolTip("Encaminhar")
@@ -2974,6 +3186,7 @@ class Visualizador(QDialog):
             topo.addWidget(b)
         topo.addWidget(self.favoritar)
         topo.addWidget(baixar)
+        topo.addWidget(self.copiar)
         topo.addWidget(self.encaminhar)
         topo.addWidget(self.mais)
         topo.addWidget(fechar)
@@ -3044,6 +3257,8 @@ class Visualizador(QDialog):
         self._selo_favorita()
         for b in (self.favoritar, self.encaminhar, self.mais):
             b.setVisible(bool(self.menu_de))
+        # só imagem: é a mesma condição do "Copiar imagem" do menu
+        self.copiar.setVisible(bool(self.menu_de) and ext in IMAGEM_EXT)
 
     def ir(self, passo: int):
         novo = self.i + passo
@@ -3058,7 +3273,7 @@ class Visualizador(QDialog):
         """O mesmo menu da bolha, aqui dentro — botao ⋮ e clique direito."""
         if not self.menu_de:
             return
-        self.menu_de(self._atual(), fechar=self.accept).exec(global_pos)
+        self.menu_de(self._atual(), fechar=self.accept, pai=self).exec(global_pos)
         self._selo_favorita()
 
     def _selo_favorita(self):
@@ -3072,6 +3287,13 @@ class Visualizador(QDialog):
     def contextMenuEvent(self, e):
         self._menu(e.globalPos())
 
+    def _copiar(self):
+        """⧉ da barra: a mesma ação do menu + um ✓ rápido, porque copiar não
+        tem nada visível acontecendo."""
+        self._disparar("⧉  Copiar imagem")
+        self.copiar.setText("✓")
+        QTimer.singleShot(1200, seguro(self.copiar, lambda: self.copiar.setText("⧉")))
+
     def _disparar(self, *prefixos: str):
         """Botao da barra dispara a acao do proprio menu.
 
@@ -3080,7 +3302,8 @@ class Visualizador(QDialog):
         """
         if not self.menu_de:
             return
-        menu = self.menu_de(self._atual(), fechar=self.accept)
+        menu = self.menu_de(self._atual(), fechar=self.accept, pai=self)
+        menu.deleteLater()  # nunca é exibido: sem isto cada clique deixava um QMenu vivo
         for a in menu.actions():
             if a.text().startswith(prefixos):
                 a.trigger()
@@ -4962,6 +5185,12 @@ class Janela(QMainWindow):
         self.conversa.setSpacing(0)
         self.conversa.doubleClicked.connect(self.abrir_anexo)
         self.conversa.verticalScrollBar().valueChanged.connect(self.talvez_paginar)
+        # conteúdo cresceu (miniatura chegou, bolha re-medida) com a conversa
+        # no fim: continua no fim. O singleShot do _descer roda antes do
+        # relayout atrasado do QListView e a tela ficava um pouco acima.
+        self.conversa.verticalScrollBar().rangeChanged.connect(
+            lambda *_: self._ancorado and self.conversa.scrollToBottom()
+        )
         self.conversa.setContextMenuPolicy(Qt.CustomContextMenu)
         self.conversa.customContextMenuRequested.connect(self.menu_da_mensagem)
         self.conversa.viewport().installEventFilter(self)
@@ -5019,12 +5248,8 @@ class Janela(QMainWindow):
         self.audio = AUDIO
         self.audio.mudou.connect(self.conversa.viewport().update)
         self._gravador: Gravador | None = None
-        self.pulso_ptt = QTimer(self)
-        self.pulso_ptt.timeout.connect(
-            lambda: self.statusBar().showMessage(
-                f"● gravando  {self.gravador.duracao() // 1000}s — clique no ⏹ para enviar"
-            )
-        )
+        self._barra_gravacao: BarraGravacao | None = None
+        self._ptt_jid = ""
         anexar = QPushButton("📎")
         anexar.setFixedWidth(40)
         anexar.setToolTip("Anexar")
@@ -5037,7 +5262,7 @@ class Janela(QMainWindow):
 
         self.b_mic = QPushButton("🎤")
         self.b_mic.setFixedWidth(40)
-        self.b_mic.setToolTip("Gravar áudio (clique para começar, clique de novo para enviar)")
+        self.b_mic.setToolTip("Gravar áudio")
         self.b_mic.clicked.connect(self.alternar_ptt)
 
         self.b_cam = QPushButton("📷")
@@ -5084,6 +5309,9 @@ class Janela(QMainWindow):
         rodape.addWidget(self.b_gif, 0, Qt.AlignBottom)
         rodape.addWidget(self.campo)
         rodape.addWidget(self.b_mic, 0, Qt.AlignBottom)
+        self._rodape = rodape
+        # o que some enquanto a gravação ocupa o lugar do campo de texto
+        self._compondo = [anexar, self.b_cam, self.b_emoji, self.b_gif, self.campo, self.b_mic]
 
         direita = QVBoxLayout()
         direita.setContentsMargins(0, 0, 0, 0)
@@ -5376,7 +5604,7 @@ class Janela(QMainWindow):
     def aplicar_filtros(self):
         selecionado = None
         if (ix := self.lista.currentIndex()).isValid():
-            selecionado = (ix.data(Qt.UserRole) or {}).get("remoteJid")
+            selecionado = (item_de(ix) or {}).get("remoteJid")
         # beginResetModel repinta barato (só as linhas visíveis), mas descarta
         # seleção e posição da barra — as duas voltam à mão.
         rolagem = self.lista.verticalScrollBar().value()
@@ -5638,6 +5866,11 @@ class Janela(QMainWindow):
             self._progresso.emit("", 0, 100, "atualizando")
         try:
             contatos = self.api.contatos()
+            if not getattr(self, "_lids_semeados", False):
+                # varre a tabela Message: uma vez por processo basta — depois
+                # o mapa segue sendo aprendido pelo socket (achado do hermes)
+                self._lids_semeados = True
+                self.api.semear_lids()
             unidos = api.unir_duplicados(self.api.chats(), contatos)
             self._contatos_prontos.emit(contatos)
             self._chats_prontos.emit(unidos)
@@ -5694,7 +5927,7 @@ class Janela(QMainWindow):
 
     def _chat_atual(self) -> dict | None:
         ix = self.lista.currentIndex()
-        return ix.data(Qt.UserRole) if ix.isValid() else None
+        return item_de(ix) if ix.isValid() else None
 
     def pular_chat(self, passo: int):
         linha = self.lista.currentIndex().row() + passo
@@ -5736,7 +5969,7 @@ class Janela(QMainWindow):
         ix = self.lista.indexAt(ponto)
         if not ix.isValid():
             return
-        if menu := self.menu_para_chat(ix.data(Qt.UserRole)):
+        if menu := self.menu_para_chat(item_de(ix)):
             menu.exec(self.lista.viewport().mapToGlobal(ponto))
 
     def menu_para_chat(self, chat: dict | None) -> QMenu | None:
@@ -5865,7 +6098,7 @@ class Janela(QMainWindow):
 
     def abrir_chat(self, ix):
         self._guardar_no_cache()
-        chat = ix.data(Qt.UserRole)
+        chat = item_de(ix)
         # a lista pode ter reordenado entre o clique e este dispatch
         if alvo := getattr(self, "_jid_clicado", None):
             if (chat or {}).get("remoteJid") != alvo:
@@ -5882,6 +6115,9 @@ class Janela(QMainWindow):
         self._badge_naolidas = 0
         self._ix_ultima_naolida = None
         self.botao_descer.hide()
+        # capturado no clique: mensagem que chega durante a carga zera o
+        # unreadCount da linha (conversa já "aberta") e matava a âncora
+        self._naolidas_ao_abrir = int(chat.get("unreadCount") or 0)
         self.msgs.jids = chat.get("_jids") or [jid]
         nome = api.nome_do_chat(chat, self.chats.contatos)
         self.titulo.setText(nome)
@@ -5906,18 +6142,24 @@ class Janela(QMainWindow):
 
         if (guardada := self._cache.get(jid)) is not None:
             guardada["saiu_em"] = None  # voltou: para de contar para a faxina
+            self._ancorando = True  # o reset do modelo não pode paginar
             self.msgs.restaurar(jid, guardada)
             self._ancorado = True
             self._descer()
+            QTimer.singleShot(150, lambda: setattr(self, "_ancorando", False))
             self.statusBar().showMessage(f"{len(guardada['itens'])} mensagens (da memória)")
             return
 
+        self._carregar_conversa(jid)
+
+    def _carregar_conversa(self, jid: str):
         self._progresso.emit(jid, 0, 100, "abrindo")
+        jids = list(self.msgs.jids)  # a thread não pode ler a conversa da vez
 
         def trabalho():
             try:
                 registros, paginas, mais = self.api.messages_recentes(
-                    self.msgs.jids,
+                    jids,
                     janela_s=int(self.cfg.get("janela_horas") or 72) * 3600,
                     progresso=lambda f, a, e: self._progresso.emit(jid, f, a, e),
                 )
@@ -5931,6 +6173,30 @@ class Janela(QMainWindow):
         POOL.submit(trabalho)
 
     def _pintar_conversa(self, jid, registros, paginas):
+        if jid not in (self.msgs.jids or []):
+            # trocou de conversa enquanto a rede respondia. Limpa o progresso
+            # mesmo assim: só aqui ele é limpo, e a barra ficava presa na
+            # linha da conversa abandonada (achado do hermes)
+            self._progresso.emit(jid, -1, 1, "")
+            return
+        # o que o socket entregou enquanto a rede respondia está em msgs.itens
+        # e o abrir() abaixo jogaria fora (e a bolha pendente de envio junto)
+        vindos = {(m.get("key") or {}).get("id") for m in registros}
+        topo = max((m.get("messageTimestamp", 0) for m in registros), default=0)
+        abertos = set(self.msgs.jids)
+        chegaram = [
+            m for m in self.msgs.itens
+            if api.jids_da_msg(m) & abertos and m.get("messageTimestamp", 0) >= topo
+            and (m.get("key") or {}).get("id") not in vindos
+        ]
+        registros = chegaram[::-1] + registros  # registros vêm DESC
+        # o reset do modelo joga a barra para o topo e o valueChanged(0)
+        # carregava a página anterior sozinho — que, ao chegar, empurrava a
+        # tela 50 mensagens para cima. O
+        # desligamento é agendado AQUI: se algo abaixo lançar, a paginação
+        # não morre para o resto da sessão (achado do hermes)
+        self._ancorando = True
+        QTimer.singleShot(150, lambda: setattr(self, "_ancorando", False))
         self.statusBar().showMessage(
             f"{len(registros)} mensagens recentes · role para cima para o histórico"
         )
@@ -5942,14 +6208,17 @@ class Janela(QMainWindow):
             if (m.get("key") or {}).get("id") in self.favoritas:
                 m["_favorita"] = True
         self.msgs.abrir(jid, registros, paginas)
-        # marca lida tudo que chegou não lido — a Evolution devolve o status por
-        # mensagem; antes só olhava os 30 primeiros registros da página
-        naolidas = [
-            m["key"] for m in self.msgs.itens
-            if not (m.get("key") or {}).get("fromMe") and m.get("status") != "READ"
-        ]
+        # Não lidas = as últimas N recebidas, N = unreadCount do chat (como o
+        # Web). O status da mensagem recebida vem SEMPRE vazio do findMessages
+        # (medido: 153 de 153 numa conversa) — por ele, tudo da janela era "não
+        # lida": a conversa abria dias para cima e marcava ~150 como lidas.
+        n, self._naolidas_ao_abrir = getattr(self, "_naolidas_ao_abrir", 0), 0
+        recebidas = [i for i, m in enumerate(self.msgs.itens)
+                     if not (m.get("key") or {}).get("fromMe")]
+        naolidas = recebidas[-n:] if n else []
         if naolidas:
-            POOL.submit(self.api.marcar_lida, naolidas)
+            POOL.submit(self.api.marcar_lida,
+                        [(self.msgs.itens[i].get("key") or {}) for i in naolidas])
         # a prévia da barra lateral pode ter ficado para trás (por exemplo, presa
         # no 🕐 de um envio): adota a última mensagem que acabou de chegar
         if registros:
@@ -5968,7 +6237,7 @@ class Janela(QMainWindow):
                 break
         # Web: com não lidas, entra na MAIS ANTIGA delas e mostra o ↓ até o
         # usuário descer; sem não lidas, vai direto ao fim como sempre
-        self._ancorar_naolidas()
+        self._ancorar_naolidas(naolidas)
         for m in registros:
             self._buscar_midia(m)
         # carga concluída (sucesso): a barra de progresso da linha some — antes
@@ -5999,14 +6268,24 @@ class Janela(QMainWindow):
         POOL.submit(trabalho)
 
     def _pintar_pagina(self, jid, registros):
-        self._ancorado = False
         registros = [
             m for m in registros
             if (m.get("key") or {}).get("id") not in self.ocultos and api.e_visivel(m)
         ]
         if jid != self.msgs.jid or not registros:
             return
+        # inserir no topo mantendo o valor da barra empurrava a tela para
+        # cima; o que se mantém é a mensagem que estava no topo (como todo
+        # chat). Pelo id: anteriores() deduplica e poda o fim, e o
+        # data(UserRole) do PySide devolve cópia (identidade não casa).
+        topo = self.conversa.indexAt(QPoint(0, 0))
+        id_topo = (self.msgs.itens[topo.row()].get("key") or {}).get("id") if topo.isValid() else None
         self.msgs.anteriores(registros)
+        self.conversa.doItemsLayout()  # o layout do QListView é atrasado
+        for i, m in enumerate(self.msgs.itens):
+            if id_topo and (m.get("key") or {}).get("id") == id_topo:
+                self.conversa.scrollTo(self.msgs.index(i), QListView.PositionAtTop)
+                break
         for m in registros:
             self._buscar_midia(m)
 
@@ -6036,34 +6315,19 @@ class Janela(QMainWindow):
 
     # ---------- âncora de não lidas (comportamento do Web) ----------
 
-    def _naolidas_no_modelo(self):
-        """(index da 1ª não lida, index da última, total) — não lida é recebida
-        com status != READ. A âncora do Web entra na MAIS ANTIGA das novas."""
-        primeira = ultima = None
-        n = 0
-        for i, m in enumerate(self.msgs.itens):
-            if not (m.get("key") or {}).get("fromMe") and m.get("status") != "READ":
-                if primeira is None:
-                    primeira = i
-                ultima = i
-                n += 1
-        return primeira, ultima, n
-
-    def _ancorar_naolidas(self):
-        primeira, ultima, n = self._naolidas_no_modelo()
+    def _ancorar_naolidas(self, ixs: list[int]):
+        """A âncora do Web entra na MAIS ANTIGA das não lidas."""
+        primeira, ultima, n = (ixs[0], ixs[-1], len(ixs)) if ixs else (None, None, 0)
         if primeira is None:
             self._ix_ultima_naolida = None
             self._badge_naolidas = 0
+            self._ancorado = True
             self.conversa.scrollToBottom()
             return
         self._ix_ultima_naolida = ultima
         self._badge_naolidas = n
         self._ancorado = False
-        self._ancorando = True
         self.conversa.scrollTo(self.msgs.index(primeira), QListView.PositionAtTop)
-        # o scroll programático dispara valueChanged -> talvez_paginar; a flag
-        # impede que ele carregue a página anterior sozinho (é do usuário subir)
-        QTimer.singleShot(150, lambda: setattr(self, "_ancorando", False))
         self._mostrar_botao_descer()
 
     def _mostrar_botao_descer(self):
@@ -6166,12 +6430,12 @@ class Janela(QMainWindow):
         ix = self.conversa.indexAt(ponto)
         if not ix.isValid():
             return
-        msg = ix.data(Qt.UserRole) or {}
+        msg = item_de(ix) or {}
         self.menu_para_mensagem(msg).exec(
             self.conversa.viewport().mapToGlobal(ponto)
         )
 
-    def menu_para_mensagem(self, msg: dict, *, fechar=None) -> QMenu:
+    def menu_para_mensagem(self, msg: dict, *, fechar=None, pai=None) -> QMenu:
         """Fonte unica do menu da mensagem: a conversa e o visualizador usam
         este mesmo. Dois menus separados foi exatamente o que deu errado — o
         visualizador nasceu sem acao nenhuma e ninguem notou, porque a lista
@@ -6180,9 +6444,13 @@ class Janela(QMainWindow):
         `fechar` e' o que o visualizador passa: as acoes que precisam da
         conversa a' vista (responder, encaminhar, ver na conversa) fecham o
         lightbox antes, como no Web.
+
+        `pai`: quem abre o menu. No Wayland o popup se ancora na janela pai —
+        com a Janela (atrás do visualizador modal) ele abria num canto e
+        fechava na hora, porque a janela bloqueada pelo modal não segura o foco.
         """
         meu = (msg.get("key") or {}).get("fromMe", False)
-        menu = QMenu(self)
+        menu = QMenu(pai or self)
 
         def agir(fn, sai=False):
             """Envolve a acao: fecha o visualizador antes quando precisa."""
@@ -6330,7 +6598,9 @@ class Janela(QMainWindow):
         chave = msg.get("key") or {}
 
         def feito():
-            msg["message"] = {"conversation": novo.strip()}
+            # ponytail: campo a parte — trocar `message` apagava a midia ao
+            # editar a legenda de uma foto
+            msg["_texto_editado"] = novo.strip()
             msg["_editada"] = True
             self.msgs.mudou(msg)
 
@@ -6371,7 +6641,10 @@ class Janela(QMainWindow):
         origem = pathlib.Path(msg.get("_arquivo", ""))
         if not origem.exists():
             return
-        destino, _ = QFileDialog.getSaveFileName(self, "Salvar como", origem.name)
+        # pai = o modal da vez (o visualizador chama daqui sem fechar): no
+        # Wayland o diálogo ancorado na Janela, atrás do modal, some por trás
+        pai = QApplication.activeModalWidget() or self
+        destino, _ = QFileDialog.getSaveFileName(pai, "Salvar como", origem.name)
         if destino:
             shutil.copy2(origem, destino)
 
@@ -6388,9 +6661,10 @@ class Janela(QMainWindow):
         """Clique no avatar/nome do header abre Dados do contato (spec 2.0:
         zonas pontuais, não a barra inteira); dentro da bolha de áudio o clique
         é botão toca/pausa ou busca na onda."""
-        if ev.type() == QEvent.MouseButtonPress and obj in (
-            self.avatar_topo, self.zona_nome
-        ):
+        # só o botão ESQUERDO é clique de ação: o direito abria a mídia (e a
+        # citação, o ➦...) em vez do menu da mensagem
+        esquerdo = ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton
+        if esquerdo and obj in (self.avatar_topo, self.zona_nome):
             if self._chat_atual():
                 self.abrir_dados_do_contato()
                 return True
@@ -6400,13 +6674,13 @@ class Janela(QMainWindow):
             # conversa. Guardamos QUEM foi clicado, nao ONDE.
             ix = self.lista.indexAt(ev.position().toPoint())
             self._jid_clicado = (
-                (ix.data(Qt.UserRole) or {}).get("remoteJid") if ix.isValid() else None
+                (item_de(ix) or {}).get("remoteJid") if ix.isValid() else None
             )
-        if obj is self.conversa.viewport() and ev.type() == QEvent.MouseButtonPress:
+        if obj is self.conversa.viewport() and esquerdo:
             ponto = ev.position().toPoint()
             ix = self.conversa.indexAt(ponto)
             if ix.isValid():
-                msg = ix.data(Qt.UserRole) or {}
+                msg = item_de(ix) or {}
                 if not api.foi_apagada(msg) and self._clique_local(ix, ponto, msg):
                     return True
                 if not api.foi_apagada(msg) and self._clique_seta(ix, ponto, msg):
@@ -6509,9 +6783,12 @@ class Janela(QMainWindow):
         # a caixa e o y vêm da MESMA replicação do paint — antes o hit-test
         # usava margem fixa e errava o alvo em janela larga e em grupo recuado
         delegado, caixa, y, _pix, _det = self._geometria(ix, msg)
-        botao, onda, _retrato = delegado.geometria_audio(caixa, y)
+        botao, onda, retrato = delegado.geometria_audio(caixa, y)
         mid = (msg.get("key") or {}).get("id", "")
         quem = "Você" if meu else (msg.get("pushName") or self.titulo.text())
+        if AUDIO.em_curso(mid) and retrato.adjusted(-8, -6, 8, 6).contains(ponto):
+            AUDIO.trocar_velocidade()  # pílula 1× / 1,5× / 2× no lugar do retrato
+            return True
         if botao.contains(ponto):
             AUDIO.alternar(mid, arquivo, quem)
             return True
@@ -6602,7 +6879,14 @@ class Janela(QMainWindow):
             if provisoria in self._pendentes:
                 self._pendentes.remove(provisoria)
             provisoria["key"] = resposta.get("key") or provisoria["key"]
-            provisoria["status"] = resposta.get("status") or "SERVER_ACK"
+            # o POST devolve PENDING, mas se respondeu a mensagem está no
+            # servidor (✓). E só avança: o socket pode já ter trazido ✓✓
+            vindo = resposta.get("status")
+            vindo = "SERVER_ACK" if vindo in (None, "PENDING") else vindo
+            atual = provisoria.get("status")
+            if vindo in api.PROGRESSO and (atual not in api.PROGRESSO or
+                    api.PROGRESSO.index(vindo) > api.PROGRESSO.index(atual)):
+                provisoria["status"] = vindo
             self.msgs.mudou(provisoria)
             self.registrar_atividade(jid, provisoria)
 
@@ -6856,18 +7140,46 @@ class Janela(QMainWindow):
         if not self.msgs.jid:
             return
         if self.gravador.gravando():
-            self.gravador.parar()
-            self.b_mic.setText("🎤")
-            self.pulso_ptt.stop()
-            self.statusBar().showMessage("enviando áudio…")
+            self._enviar_gravacao()
             return
+        # o destino é fixado AGORA: antes o áudio ia para a conversa aberta na
+        # hora do envio — trocar de conversa gravando mandava para outra pessoa
+        self._ptt_jid = self.msgs.jid
         self.gravador.iniciar()
-        self.b_mic.setText("⏹")
-        self.pulso_ptt.start(500)
-        POOL.submit(self.api.presenca, self.msgs.jid, "recording", 60_000)
+        if self._barra_gravacao is None:
+            self._barra_gravacao = BarraGravacao(self.gravador, self)
+            self._barra_gravacao.cancelar.connect(self._cancelar_gravacao)
+            self._barra_gravacao.enviar.connect(self._enviar_gravacao)
+            self._rodape.insertWidget(self._rodape.indexOf(self.campo), self._barra_gravacao, 1)
+        for w in self._compondo:
+            w.hide()
+        self._barra_gravacao.comecar()
+        self._barra_gravacao.show()
+        POOL.submit(self.api.presenca, self._ptt_jid, "recording", 60_000)
+
+    def _enviar_gravacao(self):
+        self.gravador.parar()  # o arquivo chega por `pronto` -> _ptt_pronto
+        self._fim_gravacao()
+        self.statusBar().showMessage("enviando áudio…")
+
+    def _cancelar_gravacao(self):
+        jid, self._ptt_jid = self._ptt_jid, ""  # um `pronto` perdido não envia nada
+        self.gravador.cancelar()
+        self._fim_gravacao()
+        if jid:
+            POOL.submit(self.api.presenca, jid, "paused", 1000)
+
+    def _fim_gravacao(self):
+        if self._barra_gravacao:
+            self._barra_gravacao.parar()
+            self._barra_gravacao.hide()
+        for w in self._compondo:
+            w.show()
+        self.campo.setFocus()
 
     def _ptt_pronto(self, arquivo: pathlib.Path):
-        if jid := self.msgs.jid:
+        if jid := self._ptt_jid:
+            self._ptt_jid = ""
             self._desarquivar_jid(jid)  # Web: mandar mensagem tira do arquivo
             POOL.submit(self._tentar, self.api.send_audio, jid, arquivo)
             self.statusBar().showMessage("áudio enviado")
@@ -6893,12 +7205,22 @@ class Janela(QMainWindow):
         self._pop_emoji = pop
         pop.escolhido.connect(self.campo.insertPlainText)
         pop.finished.connect(lambda _r: setattr(self, "_pop_emoji", None))
-        origem = self.campo.mapToGlobal(QPoint(0, 0))
-        tela = QApplication.primaryScreen().availableGeometry()
-        x = max(tela.left(), min(origem.x(), tela.right() - pop.width() + 1))
-        pop.move(x, max(tela.top(), origem.y() - pop.height() - 4))
+        self._sobre_o_campo(pop)
         pop.show()
         pop.busca.setFocus()
+
+    def _sobre_o_campo(self, pop):
+        """Popup logo acima do campo, contido na PRÓPRIA janela.
+
+        Nada de geometria de tela: no Wayland o app não sabe onde a janela
+        está, e com vários monitores o primaryScreen() é o monitor errado. A
+        janela é o único referencial que vale em qualquer window manager — e
+        as duas contas ficam no mesmo sistema de coordenadas do Qt.
+        """
+        origem = self.campo.mapToGlobal(QPoint(0, 0))
+        janela = QRect(self.mapToGlobal(QPoint(0, 0)), self.size())
+        x = max(janela.left(), min(origem.x(), janela.right() - pop.width() + 1))
+        pop.move(x, max(janela.top(), origem.y() - pop.height() - 4))
 
     def abrir_gif(self):
         """Popup de GIF ancorado sobre o rodapé — escolher baixa o mp4 e abre
@@ -6912,10 +7234,7 @@ class Janela(QMainWindow):
         self._pop_gif = pop
         pop.escolhido.connect(self._enviar_gif)
         pop.finished.connect(lambda _r: setattr(self, "_pop_gif", None))
-        origem = self.campo.mapToGlobal(QPoint(0, 0))
-        tela = QApplication.primaryScreen().availableGeometry()
-        x = max(tela.left(), min(origem.x(), tela.right() - pop.width() + 1))
-        pop.move(x, max(tela.top(), origem.y() - pop.height() - 4))
+        self._sobre_o_campo(pop)
         pop.show()
         pop.busca.setFocus()
 
@@ -7029,10 +7348,12 @@ class Janela(QMainWindow):
         """
         texto = api.text_of(vindo)
         jid = (vindo.get("key") or {}).get("remoteJid", "")
+        jids = api.jids_da_msg(vindo)
         for eco in list(self._pendentes):
             if eco.get("_adotado"):
                 continue
-            if (eco.get("key") or {}).get("remoteJid") != jid:
+            # o eco volta como @lid; a bolha pendente tem o numero para onde foi
+            if not jids & api.jids_da_msg(eco):
                 continue
             if api.text_of(eco) != texto:
                 continue
@@ -7051,11 +7372,18 @@ class Janela(QMainWindow):
         Vale para mensagem recebida e para mensagem enviada de outro aparelho —
         ambas chegam pelo socket (`messages.upsert` e `send.message`).
         """
-        alvo = None
-        for c in self._todos:
-            if jid in (c.get("_jids") or [c.get("remoteJid")]):
-                alvo = c
-                break
+        jids = api.jids_da_msg(msg) | {jid}
+        iguais = [c for c in self._todos if jids & set(c.get("_jids") or [c.get("remoteJid")])]
+        alvo = iguais[0] if iguais else None
+        if alvo is not None:
+            # sem isto a mensagem pelo @lid abria uma linha duplicada do contato
+            # que a lista conhece pelo numero — e se ja havia duas, funde
+            conhecidos = alvo.setdefault("_jids", [alvo.get("remoteJid")])
+            for outra in iguais[1:]:
+                jids |= set(outra.get("_jids") or [outra.get("remoteJid")])
+                alvo["unreadCount"] = int(alvo.get("unreadCount") or 0) + int(outra.get("unreadCount") or 0)
+                self._todos.remove(outra)
+            conhecidos += [j for j in sorted(jids) if j not in conhecidos]
 
         if alvo is None:  # conversa que ainda não existia na lista
             alvo = {
@@ -7072,7 +7400,7 @@ class Janela(QMainWindow):
         alvo["updatedAt"] = datetime.fromtimestamp(
             msg.get("messageTimestamp", 0) or datetime.now().timestamp()
         ).isoformat()
-        aberta = jid in (self.msgs.jids or [self.msgs.jid])
+        aberta = bool(jids & set(self.msgs.jids or [self.msgs.jid]))
         if not aberta and not (msg.get("key") or {}).get("fromMe"):
             alvo["unreadCount"] = int(alvo.get("unreadCount") or 0) + 1
         elif aberta:
@@ -7177,9 +7505,40 @@ class Janela(QMainWindow):
         tela silenciosa e' idêntica a 'ninguem escreveu'.
         """
         caiu = estado in ("caiu", "offline", "close", "connecting")
+        if caiu:
+            # ponytail: o que chegou durante a queda nao esta' em conversa
+            # nenhuma guardada — joga tudo fora e reabre do servidor
+            self._cache.clear()
+            self._caiu = True
+        elif estado == "open" and getattr(self, "_caiu", False):
+            self._caiu = False
+            POOL.submit(self._ressincronizar)
         self.statusBar().showMessage(
             f"⚠ sem conexão ({estado}) — reconectando…" if caiu else f"conexão: {estado}"
         )
+
+    def _ressincronizar(self):
+        """Socket voltou: o que chegou durante a queda não veio por evento
+        nenhum. Recarrega a lista e completa a conversa aberta."""
+        self._carregar_chats()
+        jids = list(self.msgs.jids or [self.msgs.jid])
+        if not jids[0]:
+            return
+        try:
+            registros, _ = self.api.messages(jids, 1, 30)
+        except Exception as e:
+            log.warning("ressincronizar falhou: %s", e)
+            return
+
+        def aplicar():
+            if set(jids) != set(self.msgs.jids or [self.msgs.jid]):
+                return  # trocou de conversa enquanto a rede respondia
+            tem = {(m.get("key") or {}).get("id") for m in self.msgs.itens}
+            for m in reversed(registros):  # API vem DESC
+                if (m.get("key") or {}).get("id") not in tem:
+                    self.mensagem_recebida(m)
+
+        self._na_gui.emit(aplicar)
 
     def mostrar_presenca(self, jid: str, estado: str):
         """Presença no subtítulo, prioridade do Web: digitando/gravando somem
@@ -7323,7 +7682,35 @@ class Janela(QMainWindow):
                 return
 
     def mensagem_recebida(self, msg):
+        api.aprender_lids([msg])
+        if (msg.get("key") or {}).get("fromMe") and msg.get("status") == "PENDING":
+            # o eco do servidor vem PENDING e a Evolution não manda update de
+            # SERVER_ACK (só DELIVERY/READ): se ecoou, já está no servidor — ✓.
+            # Sem isto o 🕐 ficava até o destinatário receber
+            msg["status"] = "SERVER_ACK"
         jid = (msg.get("key") or {}).get("remoteJid", "")
+        jids = api.jids_da_msg(msg)
+        aberta = bool(jids & set(self.msgs.jids or [self.msgs.jid]))
+        if not aberta:
+            # a copia em memoria desta conversa ficou velha: sem isto, reabrir
+            # restaurava a conversa sem a mensagem nova (so' a previa mostrava)
+            for chave, guardada in list(self._cache.items()):
+                if jids & {chave, *guardada["jids"]}:
+                    del self._cache[chave]
+        if ed := api.edicao_de(msg):
+            alvo, texto = ed
+            for m in self.msgs.itens:
+                if (m.get("key") or {}).get("id") == alvo:
+                    m["_texto_editado"], m["_editada"] = texto, True
+                    self.msgs.mudou(m)
+                    break
+            for c in self._todos:  # a previa tem o seu proprio objeto
+                ultima = c.get("lastMessage") or {}
+                if (ultima.get("key") or {}).get("id") == alvo:
+                    ultima["_texto_editado"], ultima["_editada"] = texto, True
+                    self.chats.mudou(c)
+                    break
+            return
         if par := api.reacao_de(msg):
             alvo, emoji, autor = par
             for m in self.msgs.itens:
@@ -7336,7 +7723,15 @@ class Janela(QMainWindow):
             return
         if (msg.get("key") or {}).get("fromMe") and self._adotar_eco(msg):
             return
-        if jid in (self.msgs.jids or [self.msgs.jid]):
+        if aberta:
+            # chegou pelo @lid numa conversa aberta pelo numero (ou vice-versa):
+            # aprende o outro jid para status, presenca e historico casarem
+            antes = set(self.msgs.jids or [self.msgs.jid])
+            self.msgs.jids = list(dict.fromkeys([*(self.msgs.jids or [self.msgs.jid]), *jids]))
+            if jids - antes and self.msgs.jid:
+                # o histórico desse jid nunca foi carregado (contato que estava
+                # partido em duas linhas): recarrega já com ele
+                self._carregar_conversa(self.msgs.jid)
             no_fim = self._ancorado or self.conversa.verticalScrollBar().value() >= (
                 self.conversa.verticalScrollBar().maximum() - 40
             )
@@ -7356,13 +7751,14 @@ class Janela(QMainWindow):
             self._buscar_midia(msg)
 
         self.registrar_atividade(jid, msg)
-        if not (msg.get("key") or {}).get("fromMe") and jid != self.msgs.jid:
+        if not (msg.get("key") or {}).get("fromMe") and not aberta:
             if self.cfg.get("notificar") and not api.esta_mudo(self.mudos, jid):
                 remetente = (msg.get("pushName") or "").strip() or api.formatar_numero(jid)
                 notificar(remetente, api.text_of(msg))
 
 
 def main():
+    faulthandler.enable()  # segfault do Qt deixa o traceback no log, não some
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )

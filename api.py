@@ -266,6 +266,8 @@ def text_of(msg: dict) -> str:
     """Texto exibível de uma mensagem, seja qual for o tipo."""
     if foi_apagada(msg):
         return APAGADA
+    if msg.get("_texto_editado"):
+        return msg["_texto_editado"]
     m = msg.get("message") or {}
     for caminho in ("conversation",):
         if m.get(caminho):
@@ -295,17 +297,78 @@ def text_of(msg: dict) -> str:
         if opcoes:
             corpo += "\n" + "\n".join(opcoes)
         return corpo
+    if texto := _texto_de_empresa(m):
+        return texto
+    for chave in ("buttonsResponseMessage", "templateButtonReplyMessage"):
+        if sel := (m.get(chave) or {}).get("selectedDisplayText"):
+            return sel
+    if sel := (m.get("listResponseMessage") or {}).get("title"):
+        return sel
+    if sel := ((m.get("interactiveResponseMessage") or {}).get("body") or {}).get("text"):
+        return sel
+    if "contactsArrayMessage" in m:
+        quem = (m["contactsArrayMessage"] or {}).get("displayName") or ""
+        return "👤 " + (quem.strip("\u200e ") or "Contatos")
+    if "liveLocationMessage" in m:
+        legenda = ((m["liveLocationMessage"] or {}).get("caption") or "").strip()
+        return "📍 Localização em tempo real" + (f" — {legenda}" if legenda else "")
+    if "pinInChatMessage" in m:
+        # type 1 = fixou para todos, 2 = desafixou (proto PinInChat.Type)
+        fixou = (m["pinInChatMessage"] or {}).get("type") != 2
+        return "📌 Fixou uma mensagem" if fixou else "📌 Desafixou uma mensagem"
     rotulos = {
         "audioMessage": "🎤 Áudio",
         "stickerMessage": "🏷 Figurinha",
+        "lottieStickerMessage": "🏷 Figurinha",
         "documentMessage": "📄 Documento",
         "imageMessage": "🖼 Imagem",
         "videoMessage": "🎬 Vídeo",
+        "ptvMessage": "🎬 Recado de vídeo",
+        # o celular ainda não repassou a mensagem — o Web mostra o mesmo aviso
+        "placeholderMessage": "⏳ Aguardando mensagem. Isso pode levar algum tempo.",
     }
     doc = m.get("documentMessage") or {}
     if doc.get("fileName"):
         return f"📄 {doc['fileName']}"
     return rotulos.get(msg.get("messageType", ""), "")
+
+
+def _texto_de_empresa(m: dict) -> str:
+    """Template, botões, lista e interativo (empresa e bot). Cada envelope
+    guarda o texto num campo diferente; junta os que vierem + os botões.
+    Medido: 388 templates com corpo em 60 dias (Amazon, banco) sumiam."""
+    t = m.get("templateMessage") or {}
+    h = t.get("hydratedTemplate") or t.get("hydratedFourRowTemplate") or {}
+    i = m.get("interactiveMessage") or t.get("interactiveMessageTemplate") or {}
+    b = m.get("buttonsMessage") or {}
+    lista = m.get("listMessage") or {}
+    partes = [
+        h.get("hydratedTitleText"), h.get("hydratedContentText"), h.get("hydratedFooterText"),
+        (i.get("header") or {}).get("title"), (i.get("body") or {}).get("text"),
+        (i.get("footer") or {}).get("text"),
+        b.get("contentText"), b.get("footerText"),
+        lista.get("title"), lista.get("description"),
+    ]
+    # roda dentro do paint da lista e da bolha: formato inesperado não pode
+    # lançar (achado do hermes — nenhum no acervo, mas o custo seria a tela)
+    def _d(x):
+        return x if isinstance(x, dict) else {}
+
+    botoes = [
+        _d(_d(x).get(k)).get("displayText")
+        for x in h.get("hydratedButtons") or []
+        for k in ("urlButton", "quickReplyButton", "callButton")
+    ]
+    botoes += [_d(_d(x).get("buttonText")).get("displayText") for x in b.get("buttons") or []]
+    for x in _d(i.get("nativeFlowMessage")).get("buttons") or []:
+        try:
+            botoes.append(_d(json.loads(_d(x).get("buttonParamsJson") or "{}")).get("display_text"))
+        except (ValueError, TypeError):
+            pass
+    botoes.append(lista.get("buttonText"))
+    texto = "\n\n".join(p.strip() for p in partes if isinstance(p, str) and p.strip())
+    rotulos = " · ".join(f"[{x.strip()}]" for x in botoes if isinstance(x, str) and x.strip())
+    return "\n\n".join(x for x in (texto, rotulos) if x)
 
 
 # Códigos de país mais usados aqui. ponytail: a lista completa da ITU tem 240
@@ -391,6 +454,8 @@ def nome_do_chat(chat: dict, contatos: dict[str, str] | None = None) -> str:
         return nome
     if jid.endswith("@g.us"):
         return "Grupo"
+    if fone := LIDS.get(jid):  # os dígitos do @lid não dizem nada a ninguém
+        return (contatos.get(fone) or "").strip() or formatar_numero(fone)
     if jid.endswith("@lid"):
         return jid.split("@")[0]
     return formatar_numero(jid)
@@ -402,7 +467,7 @@ def identidade(chat: dict) -> str:
     if jid.endswith("@g.us"):
         return jid
     alt = ((chat.get("lastMessage") or {}).get("key") or {}).get("remoteJidAlt")
-    return (alt or jid).split("@")[0]
+    return (alt or LIDS.get(jid) or jid).split("@")[0]
 
 
 def unir_duplicados(chats: list[dict], contatos: dict[str, str] | None = None) -> list[dict]:
@@ -410,6 +475,14 @@ def unir_duplicados(chats: list[dict], contatos: dict[str, str] | None = None) -
     contato como chats separados. Une: fica o mais recente, com o melhor nome
     dos dois e a lista de JIDs em `_jids` para o histórico não sumir.
     """
+    aprender_lids(c.get("lastMessage") for c in chats)
+    for c in chats:
+        # o findChats congela o status do envio (PENDING) e nunca atualiza; o
+        # histórico da mesma mensagem tem ✓/✓✓ (medido no acervo).
+        # O que o servidor guardou já saiu daqui — 🕐 é só da bolha local.
+        ultima = c.get("lastMessage") or {}
+        if ultima.get("status") == "PENDING" and (ultima.get("key") or {}).get("fromMe"):
+            ultima["status"] = "SERVER_ACK"
     grupos: dict[str, list[dict]] = {}
     for c in chats:
         grupos.setdefault(identidade(c), []).append(c)
@@ -440,14 +513,63 @@ OCULTAS = {"reactionMessage", "protocolMessage", "senderKeyDistributionMessage",
            "messageContextInfo", "pollUpdateMessage", "associatedChildMessage",
            # sem conteúdo renderizável no nosso lado — bolha vazia não pode:
            # albumMessage é só o envelope do álbum (as mídias vêm separadas),
-           # templateMessage sem corpo é consentimento de URL (medido: Rodobens),
            # secretEncryptedMessage não sai da criptografia de segredo
-           "albumMessage", "templateMessage", "secretEncryptedMessage", "unknown"}
+           "albumMessage", "secretEncryptedMessage", "limitSharingMessage", "unknown"}
 
 
 def e_visivel(msg: dict) -> bool:
     """Reação e mensagem de protocolo não são bolhas — não podem virar linha."""
+    if not msg.get("message") and msg.get("status") == "EDITED":
+        # registro sem conteúdo com status EDITED: 582 no acervo, de todos os
+        # tipos, sem gêmeo com conteúdo — virava bolha vazia ou só o rótulo.
+        # Só esse caso: mídia com message vazio e outro status segue visível
+        return False
+    if msg.get("messageType") == "templateMessage":
+        # sem corpo é consentimento de URL (medido: Rodobens) — bolha vazia não
+        return bool(text_of(msg))
     return msg.get("messageType") not in OCULTAS
+
+
+def jids_da_msg(msg: dict) -> set[str]:
+    """remoteJid + remoteJidAlt. Desde a migração para @lid toda conversa 1:1
+    chega como @lid (medido: 100% em 3 dias) e o número só vem no Alt — casar
+    só o remoteJid deixa de fora a conversa que a lista conhece pelo número.
+    Mensagem minha pelo @lid vem SEM Alt: aí quem resolve é o mapa aprendido."""
+    k = msg.get("key") or {}
+    jid = k.get("remoteJid") or ""
+    if jid.endswith("@g.us"):
+        return {jid}  # grupo nunca se funde com a conversa 1:1 de ninguém
+    return {j for j in (jid, k.get("remoteJidAlt"), LIDS.get(jid)) if j}
+
+
+# @lid -> número, aprendido de toda mensagem que traz remoteJidAlt e guardado
+# em disco. Sem ele o mesmo contato virava duas linhas sempre que a última
+# mensagem do chat @lid era minha (essas vêm sem Alt).
+LIDS: dict[str, str] = {}
+
+
+def aprender_lids(msgs) -> None:
+    if not LIDS:
+        LIDS.update(cache_ler("lids", 10**10) or {})
+    novo = False
+    for m in msgs:
+        k = (m or {}).get("key") or {}
+        lid, alt = k.get("remoteJid") or "", k.get("remoteJidAlt") or ""
+        if lid.endswith("@lid") and alt.endswith("@s.whatsapp.net") and LIDS.get(lid) != alt:
+            LIDS[lid] = alt
+            novo = True
+    if novo:
+        cache_gravar("lids", dict(LIDS))
+
+
+def edicao_de(msg: dict) -> tuple[str, str] | None:
+    """(id da mensagem editada, texto novo) — protocolMessage type 14."""
+    p = (msg.get("message") or {}).get("protocolMessage") or {}
+    if p.get("type") not in (14, "MESSAGE_EDIT") or not p.get("editedMessage"):
+        return None
+    alvo = (p.get("key") or {}).get("id")
+    texto = text_of({"message": p["editedMessage"]})
+    return (alvo, texto) if alvo and texto else None
 
 
 def reacao_de(msg: dict) -> tuple[str, str, str] | None:
@@ -504,7 +626,10 @@ def aplicar_reacoes(registros: list[dict]) -> list[dict]:
     porc_alvo: dict[str, dict[str, str]] = {}
     # os registros chegam do mais novo para o mais velho; reagir e depois
     # desfazer so' da' o resultado certo se lido em ordem cronologica
+    editadas: dict[str, str] = {}
     for m in reversed(registros):
+        if ed := edicao_de(m):
+            editadas[ed[0]] = ed[1]  # cronológico: a última edição vence
         if par := reacao_de(m):
             alvo, emoji, autor = par
             atual = porc_alvo.setdefault(alvo, {})
@@ -514,6 +639,8 @@ def aplicar_reacoes(registros: list[dict]) -> list[dict]:
                 atual.pop(autor, None)
     visiveis = [m for m in registros if e_visivel(m)]
     for m in visiveis:
+        if novo := editadas.get((m.get("key") or {}).get("id")):
+            m["_texto_editado"], m["_editada"] = novo, True
         reacoes = porc_alvo.get((m.get("key") or {}).get("id"))
         if reacoes:
             m["_reacoes"] = dict(reacoes)
@@ -547,7 +674,7 @@ def previa(chat: dict, contatos: dict[str, str] | None = None) -> tuple[str, str
 
     tipo = msg.get("messageType", "")
     icone = ICONES.get(tipo, "")
-    corpo = text_of(msg)
+    corpo = text_of(msg) or _previa_oculta(msg)
     if tipo == "audioMessage":
         seg = _num(((msg.get("message") or {}).get("audioMessage") or {}).get("seconds"))
         corpo = f"{seg // 60}:{seg % 60:02d}" if seg else ""
@@ -555,6 +682,24 @@ def previa(chat: dict, contatos: dict[str, str] | None = None) -> tuple[str, str
         corpo = corpo[len(icone):].strip()
     texto = f"{icone} {corpo}".strip() if icone else corpo
     return marca, autor, texto
+
+
+def _previa_oculta(msg: dict) -> str:
+    """O que não vira bolha mas pode ser a última coisa do chat — sem isto a
+    prévia ficava "Fulano:" e mais nada (medido: 35 chats)."""
+    m = msg.get("message") or {}
+    if par := reacao_de(msg):
+        return f"Reagiu {par[1]}" if par[1] else "Removeu uma reação"
+    editada = ((m.get("editedMessage") or {}).get("message") or {}).get("protocolMessage")
+    if ed := edicao_de({"message": {"protocolMessage": editada}} if editada else msg):
+        return ed[1]
+    if filho := (m.get("associatedChildMessage") or {}).get("message"):  # item de álbum
+        return text_of({"message": filho, "messageType": next(iter(filho), "")})
+    if "pollUpdateMessage" in m:
+        return "📊 Votou numa enquete"
+    if "call" in m:
+        return "📞 Chamada"
+    return ""
 
 
 # Escala de confirmação do WhatsApp (WAMessageStatus do Baileys), do menos
@@ -769,6 +914,22 @@ class Api:
 
         Devolve (mensagens, páginas totais, tem_mais_antigo).
         """
+        # cada jid anda no seu ritmo (o @lid tem o recente, o número o antigo);
+        # junta e corta onde um jid que ainda tem histórico parou — abaixo dali
+        # faltaria mensagem dele e o rolar pra cima não volta
+        partes = [self._janela(j, janela_s, minimo, teto, progresso) for j in jids]
+        juntos = sorted((m for regs, _, _ in partes for m in regs),
+                        key=lambda m: m.get("messageTimestamp", 0), reverse=True)
+        limite = max((min(m.get("messageTimestamp", 0) for m in regs)
+                      for regs, _, mais in partes if mais and regs), default=0)
+        # reações aplicadas UMA vez, sobre os registros crus: aplicar por página
+        # e de novo no acumulado apagava todas (a 2ª passada não as vê mais)
+        return (aplicar_reacoes([m for m in juntos if m.get("messageTimestamp", 0) >= limite]),
+                sum(p for _, p, _ in partes), any(mais for _, _, mais in partes))
+
+    def _janela(self, jid: str, janela_s: int, minimo: int, teto: int,
+                progresso) -> tuple[list[dict], int, bool]:
+        """Registros crus de UM jid, página a página até cruzar a janela."""
         corte = int(time.time()) - janela_s
         acumulado: list[dict] = []
         pagina, paginas = 1, 1
@@ -777,9 +938,10 @@ class Api:
                 # progresso REAL: quantas mensagens ja' chegaram de fato, e a que
                 # distancia a mais antiga esta' da borda da janela de 72h
                 progresso(len(acumulado), teto, f"página {pagina}")
-            registros, paginas = self.messages(jids, pagina, 50)
+            bloco = self._find_messages(jid, pagina, 50)
+            registros, paginas = bloco["records"], bloco["pages"]
             if not registros:
-                return (aplicar_reacoes(acumulado), paginas, False)
+                return (acumulado, paginas, False)
             acumulado += registros
             mais_velha = min(m.get("messageTimestamp", 0) for m in registros)
             passou = mais_velha < corte
@@ -790,11 +952,10 @@ class Api:
                 progresso(len(acumulado), teto,
                           f"{len(acumulado)} mensagens · {idade // 3600}h de histórico")
             if (passou and len(acumulado) >= minimo) or len(acumulado) >= teto:
-                break
+                return (acumulado, paginas, True)
             if pagina >= paginas:
-                return (aplicar_reacoes(acumulado), paginas, False)
+                return (acumulado, paginas, False)
             pagina += 1
-        return (aplicar_reacoes(acumulado), paginas, True)
 
     def messages(
         self, jid: str | list[str], page: int = 1, size: int = 50
@@ -805,21 +966,50 @@ class Api:
         mescla por timestamp — senão metade do histórico fica invisível.
         """
         jids = [jid] if isinstance(jid, str) else list(jid)
+        if len(jids) == 1:
+            bloco = self._find_messages(jids[0], page, size)
+            return aplicar_reacoes(bloco["records"]), bloco["pages"]
+        # Vários jids: a página N de cada um, junta e corta, deixava buraco — o
+        # que sobrava do corte nunca voltava. Pega o topo inteiro de cada um e
+        # fatia a página N da linha do tempo unida.
+        # ponytail: custo cresce com a profundidade (página 10 = 500 por jid);
+        # cursor por jid se rolar muito para trás ficar lento
         registros: list[dict] = []
-        paginas = 1
+        total = 0
         for j in jids:
-            r = self.http.post(
-                f"/chat/findMessages/{self.instance}",
-                json={"where": {"key": {"remoteJid": j}}, "page": page, "offset": size},
-            )
-            r.raise_for_status()
-            bloco = r.json()["messages"]
+            bloco = self._find_messages(j, 1, page * size)
             registros += bloco["records"]
-            paginas = max(paginas, bloco["pages"])
-        if len(jids) > 1:
-            registros.sort(key=lambda m: m.get("messageTimestamp", 0), reverse=True)
-            registros = registros[:size]
-        return aplicar_reacoes(registros), paginas
+            total += bloco.get("total") or 0
+        registros.sort(key=lambda m: m.get("messageTimestamp", 0), reverse=True)
+        return aplicar_reacoes(registros[(page - 1) * size:page * size]), max(1, -(-total // size))
+
+    def _find_messages(self, jid: str, page: int, size: int) -> dict:
+        r = self.http.post(
+            f"/chat/findMessages/{self.instance}",
+            json={"where": {"key": {"remoteJid": jid}}, "page": page, "offset": size},
+        )
+        r.raise_for_status()
+        bloco = r.json()["messages"]
+        aprender_lids(bloco["records"])
+        return bloco
+
+    def semear_lids(self) -> None:
+        """Na abertura, o mapa @lid -> número inteiro de uma vez pelo Postgres
+        (quando configurado): sem isto o vínculo só seria aprendido quando a
+        conversa fosse aberta, e a lista já nasceria com o contato partido."""
+        if not self.pg:
+            return
+        try:
+            import psycopg
+            with psycopg.connect(**self.pg, connect_timeout=5) as con:
+                linhas = con.execute(
+                    """SELECT DISTINCT ON (key->>'remoteJid') key->>'remoteJid', key->>'remoteJidAlt'
+                       FROM "Message" WHERE key->>'remoteJid' LIKE '%@lid'
+                       AND key->>'remoteJidAlt' LIKE '%@s.whatsapp.net'"""
+                ).fetchall()
+            aprender_lids({"key": {"remoteJid": a, "remoteJidAlt": b}} for a, b in linhas)
+        except Exception:
+            pass  # busca no Postgres é opcional; o mapa segue sendo aprendido
 
     # ---------- envio ----------
 
@@ -1822,6 +2012,49 @@ if __name__ == "__main__":
         "options": [{"optionName": "A"}, {"optionName": "B"}]}}})
     assert poll == "📊 P?\n• A\n• B", f"poll: {poll!r}"
     assert not e_visivel({"messageType": "templateMessage"}), "template vira bolha vazia"
+    assert not e_visivel({"messageType": "conversation", "message": None, "status": "EDITED"})
+    assert e_visivel({"messageType": "conversation", "message": None, "status": "DELETED"})
+    assert e_visivel({"messageType": "audioMessage", "message": {}, "key": {"id": "a"}})
+    assert text_of({"message": {"templateMessage": {"hydratedTemplate": {
+        "hydratedContentText": "oi", "hydratedButtons": ["solto"]}}}}) == "oi"
+    assert jids_da_msg({"key": {"remoteJid": "1@g.us", "remoteJidAlt": "5@s.whatsapp.net"}}) == {"1@g.us"}
+    tpl = {"messageType": "templateMessage", "message": {"templateMessage": {"hydratedTemplate": {
+        "hydratedContentText": "Pedido enviado", "hydratedButtons": [
+            {"urlButton": {"displayText": "Rastrear"}}]}}}}
+    assert e_visivel(tpl) and text_of(tpl) == "Pedido enviado\n\n[Rastrear]", text_of(tpl)
+    assert text_of({"message": {"buttonsMessage": {"contentText": "Ajudei?", "buttons": [
+        {"buttonText": {"displayText": "Sim"}}]}}}) == "Ajudei?\n\n[Sim]"
+    assert text_of({"message": {"listResponseMessage": {"title": "14:00"}}}) == "14:00"
+    assert text_of({"messageType": "placeholderMessage", "message": {}}).startswith("⏳")
+    assert jids_da_msg({"key": {"remoteJid": "9@lid", "remoteJidAlt": "55@s.whatsapp.net"}}) == {
+        "9@lid", "55@s.whatsapp.net"}
+    # a última do chat @lid é minha (sem Alt); o par vem do mapa aprendido
+    LIDS["7@lid"] = "5581@s.whatsapp.net"
+    par = unir_duplicados([
+        {"remoteJid": "7@lid", "lastMessage": {"key": {"fromMe": True, "remoteJid": "7@lid"}}},
+        {"remoteJid": "5581@s.whatsapp.net", "lastMessage": {"key": {"fromMe": True}}},
+    ])
+    assert len(par) == 1, "contato partido em duas linhas"
+    assert nome_do_chat({"remoteJid": "7@lid"}, {"5581@s.whatsapp.net": "Carla"}) == "Carla"
+    p = unir_duplicados([{"remoteJid": "1@s.whatsapp.net", "lastMessage": {
+        "status": "PENDING", "key": {"fromMe": True}}}])
+    assert p[0]["lastMessage"]["status"] == "SERVER_ACK", "prévia presa no 🕐"
+    reag = {"lastMessage": {"key": {"fromMe": True, "id": "x"}, "messageType": "reactionMessage",
+            "message": {"reactionMessage": {"key": {"id": "y"}, "text": "😂"}}}}
+    assert previa(reag)[1:] == ("Você", "Reagiu 😂"), previa(reag)
+    album = {"lastMessage": {"key": {}, "messageType": "associatedChildMessage",
+             "message": {"associatedChildMessage": {"message": {"imageMessage": {}}}}}}
+    assert previa(album)[2] == "🖼 Imagem", previa(album)
+    assert jids_da_msg({"key": {"remoteJid": "7@lid", "fromMe": True}}) == {"7@lid", "5581@s.whatsapp.net"}
+    del LIDS["7@lid"]
+    ed = {"messageType": "protocolMessage", "message": {"protocolMessage": {
+        "type": 14, "key": {"id": "o1"}, "editedMessage": {"conversation": "novo"}}}}
+    orig = {"key": {"id": "o1"}, "messageType": "conversation", "message": {"conversation": "velho"}}
+    assert [text_of(m) for m in aplicar_reacoes([ed, orig])] == ["novo"], "edição não aplicada"
+    reac = {"key": {"id": "r9", "participant": "a@lid"}, "messageType": "reactionMessage",
+            "message": {"reactionMessage": {"key": {"id": "o1"}, "text": "👍"}}}
+    assert aplicar_reacoes([reac, orig])[0].get("_reacoes"), "reação não aplicada"
+    print("ok  template/botões/lista/edição viram texto")
     assert not e_visivel({"messageType": "albumMessage"})
     assert text_of({"key": {"deleted": True}, "message": {"conversation": "segredo"}}) == APAGADA, (
         "conteudo de mensagem apagada nao pode vazar"

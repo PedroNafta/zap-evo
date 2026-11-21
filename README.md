@@ -61,7 +61,7 @@ Sem o campo, o comportamento continua idêntico ao original.
 
 ```sh
 uv run --with httpx python api.py               # autoteste da camada de API
-QT_QPA_PLATFORM=offscreen uv run t_conversa.py  # idem para t_gif.py e t_painel.py
+QT_QPA_PLATFORM=offscreen uv run t_conversa.py  # idem para t_gif.py, t_painel.py e t_tempo_real.py
 ```
 
 Desenvolvido com auxílio de IA (Claude Code).
