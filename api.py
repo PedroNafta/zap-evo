@@ -466,6 +466,21 @@ def nome_do_chat(chat: dict, contatos: dict[str, str] | None = None) -> str:
     return formatar_numero(jid)
 
 
+def jids_do_contato(jid: str) -> list[str]:
+    """Todos os endereços que já vimos do mesmo contato: o número e os @lid.
+
+    A conversa pode estar aberta pelo número e a resposta chegar pelo @lid (é o
+    padrão da migração do WhatsApp). Sem juntar os dois, metade do histórico não
+    aparece — e a mensagem nova é descartada por não casar com o jid aberto.
+    """
+    if not LIDS:
+        LIDS.update(cache_ler("lids", 10**10) or {})
+    if jid.endswith("@lid"):
+        numero = LIDS.get(jid)
+        return [jid, *([numero] if numero else [])]
+    return [jid, *(l for l, n in LIDS.items() if n == jid)]
+
+
 def identidade(chat: dict) -> str:
     """Quem é o contato por trás do chat — o mesmo para @lid e @s.whatsapp.net."""
     jid = chat.get("remoteJid", "")

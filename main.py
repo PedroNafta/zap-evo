@@ -6768,7 +6768,10 @@ class Janela(QMainWindow):
         # capturado no clique: mensagem que chega durante a carga zera o
         # unreadCount da linha (conversa já "aberta") e matava a âncora
         self._naolidas_ao_abrir = int(chat.get("unreadCount") or 0)
-        self.msgs.jids = chat.get("_jids") or [jid]
+        # a linha da lista pode estar unida (@lid + numero) ou não: em qualquer
+        # caso o painel precisa dos dois endereços para não perder mensagem
+        self.msgs.jids = list(dict.fromkeys(
+            [*(chat.get("_jids") or []), *api.jids_do_contato(jid)])) or [jid]
         self._ajustar_modo()  # estreito: a conversa toma o lugar da lista
         nome = api.nome_do_chat(chat, self.chats.contatos)
         self.titulo.setText(nome)
@@ -6796,12 +6799,22 @@ class Janela(QMainWindow):
 
         if (guardada := self._cache.get(jid)) is not None:
             guardada["saiu_em"] = None  # voltou: para de contar para a faxina
+            # a cópia em memória pode ter sido guardada antes de o @lid ser
+            # aprendido, e restaurá-la com os jids velhos escondia mensagem
+            guardada["jids"] = list(dict.fromkeys(
+                [*self.msgs.jids, *(guardada.get("jids") or [])]))
             self._ancorando = True  # o reset do modelo não pode paginar
             self.msgs.restaurar(jid, guardada)
             self._ancorado = True
             self._descer()
             QTimer.singleShot(150, lambda: setattr(self, "_ancorando", False))
             self.statusBar().showMessage(f"{len(guardada['itens'])} mensagens (da memória)")
+            # memória envelhece: mostra na hora e confere com o servidor atrás.
+            # Sem isto a conversa ficava congelada no que foi guardado
+            topo_cache = max((m.get("messageTimestamp", 0) for m in guardada["itens"]), default=0)
+            ultima = (chat.get("lastMessage") or {}).get("messageTimestamp") or 0
+            if ultima > topo_cache:
+                self._carregar_conversa(jid)
             return
 
         self._carregar_conversa(jid)
@@ -8627,6 +8640,8 @@ class Janela(QMainWindow):
             msg["status"] = "SERVER_ACK"
         jid = (msg.get("key") or {}).get("remoteJid", "")
         jids = api.jids_da_msg(msg)
+        # o mesmo contato pode ter chegado pelo outro endereço (@lid x numero)
+        jids |= set(api.jids_do_contato(jid)) if jid else set()
         aberta = bool(jids & set(self.msgs.jids or [self.msgs.jid]))
         if not aberta:
             # a copia em memoria desta conversa ficou velha: sem isto, reabrir

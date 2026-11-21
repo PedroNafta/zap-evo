@@ -880,5 +880,41 @@ assert main.marca_de_desenho("lixo") == ""
 ok += 1
 print("ok  ✓ ✓✓ 🕐 ⚠ têm traço próprio; nenhuma marca cai em emoji")
 
-print(f"\n{ok}/46 passaram")
+# ---------- conversa partida em @lid e número (mensagem sumindo)
+NUM, LID = "558192838708@s.whatsapp.net", "132289405173896@lid"
+api.LIDS[LID] = NUM
+assert set(api.jids_do_contato(NUM)) >= {NUM, LID}, api.jids_do_contato(NUM)
+assert set(api.jids_do_contato(LID)) >= {NUM, LID}, api.jids_do_contato(LID)
+ok += 1
+print("ok  jids_do_contato junta número e @lid nos dois sentidos")
+
+# a cópia em memória guardada antes de aprender o @lid não pode esconder mensagem
+j.pacote_icones = "emoji"
+j.msgs.jids = [NUM]
+j._cache[NUM] = {
+    "jids": [NUM],  # cache velho: só o número
+    "itens": [{"key": {"id": "c1", "fromMe": True, "remoteJid": NUM},
+               "messageType": "conversation", "messageTimestamp": 1795000000,
+               "message": {"conversation": "do cache"}}],
+    "pagina": 1, "paginas": 1, "saiu_em": None,
+}
+carregou = []
+j._carregar_conversa = lambda jid: carregou.append(jid)
+j.abrir_chat(j.chats.index(0)) if j.chats.itens else None
+# monta a linha como a lista entrega (unida) e abre
+linha = {"remoteJid": NUM, "name": "Ortech", "unreadCount": 0,
+         "_jids": [NUM, LID],
+         "lastMessage": {"key": {"id": "c9", "fromMe": False, "remoteJid": LID},
+                         "messageType": "conversation",
+                         "messageTimestamp": 1795999999,   # mais nova que o cache
+                         "message": {"conversation": "Fechamos"}}}
+j._todos = [linha]
+j.chats.definir([linha])
+j.abrir_chat(j.chats.index(0))
+assert set(j.msgs.jids) == {NUM, LID}, j.msgs.jids
+assert carregou == [NUM], "com o cache atrasado, tinha que buscar no servidor"
+ok += 1
+print("ok  cache velho não esconde o @lid e a conversa é conferida no servidor")
+
+print(f"\n{ok}/48 passaram")
 main.POOL.shutdown(wait=False, cancel_futures=True)
