@@ -286,11 +286,11 @@ def text_of(msg: dict) -> str:
     if "locationMessage" in m:
         loc = m.get("locationMessage") or {}
         lugar = " — ".join(x for x in (loc.get("name"), loc.get("address")) if x)
-        return f"📍 {lugar}" if lugar else "📍 Localização"
+        return f"Localização — {lugar}" if lugar else "Localização"
     if "contactMessage" in m:
         cont = m.get("contactMessage") or {}
         quem = (cont.get("displayName") or "").strip()
-        return f"👤 {quem}" if quem else "👤 Contato"
+        return quem or "Contato"
     if "pollCreationMessage" in m:
         # a bolha mostra a pergunta + opções; votar exige o messageSecret e o
         # endpoint de voto — fica para quando houver uma enquete real no acervo
@@ -298,7 +298,7 @@ def text_of(msg: dict) -> str:
         opcoes = [f"• {(o.get('optionName') or '').strip()}" for o in
                   (poll.get("options") or []) if (o.get("optionName") or "").strip()]
         pergunta = (poll.get("name") or "Enquete").strip()
-        corpo = "📊 " + pergunta
+        corpo = "Enquete: " + pergunta
         if opcoes:
             corpo += "\n" + "\n".join(opcoes)
         return corpo
@@ -313,28 +313,28 @@ def text_of(msg: dict) -> str:
         return sel
     if "contactsArrayMessage" in m:
         quem = (m["contactsArrayMessage"] or {}).get("displayName") or ""
-        return "👤 " + (quem.strip("\u200e ") or "Contatos")
+        return quem.strip("\u200e ") or "Contatos"
     if "liveLocationMessage" in m:
         legenda = ((m["liveLocationMessage"] or {}).get("caption") or "").strip()
-        return "📍 Localização em tempo real" + (f" — {legenda}" if legenda else "")
+        return "Localização em tempo real" + (f" — {legenda}" if legenda else "")
     if "pinInChatMessage" in m:
         # type 1 = fixou para todos, 2 = desafixou (proto PinInChat.Type)
         fixou = (m["pinInChatMessage"] or {}).get("type") != 2
-        return "📌 Fixou uma mensagem" if fixou else "📌 Desafixou uma mensagem"
+        return "Fixou uma mensagem" if fixou else "Desafixou uma mensagem"
     rotulos = {
-        "audioMessage": "🎤 Áudio",
-        "stickerMessage": "🏷 Figurinha",
-        "lottieStickerMessage": "🏷 Figurinha",
-        "documentMessage": "📄 Documento",
-        "imageMessage": "🖼 Imagem",
-        "videoMessage": "🎬 Vídeo",
-        "ptvMessage": "🎬 Recado de vídeo",
+        "audioMessage": "Áudio",
+        "stickerMessage": "Figurinha",
+        "lottieStickerMessage": "Figurinha",
+        "documentMessage": "Documento",
+        "imageMessage": "Imagem",
+        "videoMessage": "Vídeo",
+        "ptvMessage": "Recado de vídeo",
         # o celular ainda não repassou a mensagem — o Web mostra o mesmo aviso
-        "placeholderMessage": "⏳ Aguardando mensagem. Isso pode levar algum tempo.",
+        "placeholderMessage": "Aguardando mensagem. Isso pode levar algum tempo.",
     }
     doc = m.get("documentMessage") or {}
     if doc.get("fileName"):
-        return f"📄 {doc['fileName']}"
+        return doc["fileName"]
     return rotulos.get(msg.get("messageType", ""), "")
 
 
@@ -654,16 +654,26 @@ def aplicar_reacoes(registros: list[dict]) -> list[dict]:
     return visiveis
 
 
+# tipo -> slot de ícone (quem desenha é a interface; aqui só o nome do desenho)
 ICONES = {
-    "imageMessage": "🖼", "videoMessage": "🎬", "audioMessage": "🎤",
-    "documentMessage": "📄", "stickerMessage": "🏷", "locationMessage": "📍",
-    "contactMessage": "👤", "contactsArrayMessage": "👤", "pollCreationMessage": "📊",
+    "imageMessage": "imagem", "videoMessage": "video", "audioMessage": "microfone",
+    "documentMessage": "documento", "stickerMessage": "estrela",
+    "locationMessage": "mapa", "liveLocationMessage": "mapa",
+    "contactMessage": "contato", "contactsArrayMessage": "contato",
+    "pollCreationMessage": "mais",
 }
+
+
+def slot_de(msg: dict) -> str:
+    """Nome do ícone para a mensagem ('' quando não é mídia)."""
+    tipo = msg.get("messageType") or next(iter(msg.get("message") or {}), "")
+    return ICONES.get(tipo, "")
 
 
 def previa(chat: dict, contatos: dict[str, str] | None = None) -> tuple[str, str, str]:
     """(marca de leitura, autor, texto) da última mensagem — o formato da
-    barra lateral do WhatsApp Web: "✓✓ Você: 🖼 legenda"."""
+    barra lateral do WhatsApp Web: "✓✓ Você: legenda" — o ícone do tipo
+    quem desenha é a lista, não a string."""
     msg = chat.get("lastMessage") or {}
     if not msg:
         return "", "", ""
@@ -678,15 +688,12 @@ def previa(chat: dict, contatos: dict[str, str] | None = None) -> tuple[str, str
         autor = (msg.get("pushName") or "").strip()
 
     tipo = msg.get("messageType", "")
-    icone = ICONES.get(tipo, "")
     corpo = text_of(msg) or _previa_oculta(msg)
     if tipo == "audioMessage":
         seg = _num(((msg.get("message") or {}).get("audioMessage") or {}).get("seconds"))
         corpo = f"{seg // 60}:{seg % 60:02d}" if seg else ""
-    elif icone and corpo.startswith(icone):
-        corpo = corpo[len(icone):].strip()
-    texto = f"{icone} {corpo}".strip() if icone else corpo
-    return marca, autor, texto
+    # sem emoji na prévia: o desenho é do pacote, e quem pinta a linha o desenha
+    return marca, autor, corpo.strip()
 
 
 def _previa_oculta(msg: dict) -> str:
@@ -701,9 +708,9 @@ def _previa_oculta(msg: dict) -> str:
     if filho := (m.get("associatedChildMessage") or {}).get("message"):  # item de álbum
         return text_of({"message": filho, "messageType": next(iter(filho), "")})
     if "pollUpdateMessage" in m:
-        return "📊 Votou numa enquete"
+        return "Votou numa enquete"
     if "call" in m:
-        return "📞 Chamada"
+        return "Chamada"
     return ""
 
 
@@ -2032,12 +2039,12 @@ if __name__ == "__main__":
     assert "href='https://www.x.com.br'" in formatar("veja www.x.com.br."), "www sem esquema"
     assert formatar("veja www.x.com.br.").endswith("</a>."), "ponto final virou URL"
     assert text_of({"message": {"locationMessage": {"name": "Recife",
-        "address": "PE"}}}) == "📍 Recife — PE", "location perde nome/endereco"
-    assert text_of({"message": {"locationMessage": {}}}) == "📍 Localização"
-    assert text_of({"message": {"contactMessage": {"displayName": "Ana"}}}) == "👤 Ana"
+        "address": "PE"}}}) == "Localização — Recife — PE", "location perde nome/endereco"
+    assert text_of({"message": {"locationMessage": {}}}) == "Localização"
+    assert text_of({"message": {"contactMessage": {"displayName": "Ana"}}}) == "Ana"
     poll = text_of({"message": {"pollCreationMessage": {"name": "P?",
         "options": [{"optionName": "A"}, {"optionName": "B"}]}}})
-    assert poll == "📊 P?\n• A\n• B", f"poll: {poll!r}"
+    assert poll == "Enquete: P?\n• A\n• B", f"poll: {poll!r}"
     assert not e_visivel({"messageType": "templateMessage"}), "template vira bolha vazia"
     assert not e_visivel({"messageType": "conversation", "message": None, "status": "EDITED"})
     assert e_visivel({"messageType": "conversation", "message": None, "status": "DELETED"})
@@ -2052,7 +2059,7 @@ if __name__ == "__main__":
     assert text_of({"message": {"buttonsMessage": {"contentText": "Ajudei?", "buttons": [
         {"buttonText": {"displayText": "Sim"}}]}}}) == "Ajudei?\n\n[Sim]"
     assert text_of({"message": {"listResponseMessage": {"title": "14:00"}}}) == "14:00"
-    assert text_of({"messageType": "placeholderMessage", "message": {}}).startswith("⏳")
+    assert text_of({"messageType": "placeholderMessage", "message": {}}).startswith("Aguardando")
     assert jids_da_msg({"key": {"remoteJid": "9@lid", "remoteJidAlt": "55@s.whatsapp.net"}}) == {
         "9@lid", "55@s.whatsapp.net"}
     # a última do chat @lid é minha (sem Alt); o par vem do mapa aprendido
@@ -2071,7 +2078,7 @@ if __name__ == "__main__":
     assert previa(reag)[1:] == ("Você", "Reagiu 😂"), previa(reag)
     album = {"lastMessage": {"key": {}, "messageType": "associatedChildMessage",
              "message": {"associatedChildMessage": {"message": {"imageMessage": {}}}}}}
-    assert previa(album)[2] == "🖼 Imagem", previa(album)
+    assert previa(album)[2] == "Imagem", previa(album)
     assert jids_da_msg({"key": {"remoteJid": "7@lid", "fromMe": True}}) == {"7@lid", "5581@s.whatsapp.net"}
     del LIDS["7@lid"]
     ed = {"messageType": "protocolMessage", "message": {"protocolMessage": {
@@ -2088,7 +2095,7 @@ if __name__ == "__main__":
     )
     assert foi_apagada({"status": "DELETED"}) and not foi_apagada({"key": {}})
     print("ok  mensagem apagada não mostra o conteúdo")
-    assert "📄" in text_of(
+    assert "x.pdf" in text_of(
         {"messageType": "documentMessage", "message": {"documentMessage": {"fileName": "x.pdf"}}}
     )
     assert media_kind("conversation") is None and media_kind("imageMessage") == "image"
@@ -2205,11 +2212,11 @@ if __name__ == "__main__":
     m, a_, x = previa({"remoteJid": "g@g.us", "lastMessage": {
         "key": {"fromMe": False}, "pushName": "Wilton", "messageType": "imageMessage",
         "message": {"imageMessage": {"caption": "No cliente"}}}})
-    assert (m, a_, x) == ("", "Wilton", "🖼 No cliente"), (m, a_, x)
+    assert (m, a_, x) == ("", "Wilton", "No cliente"), (m, a_, x)
     m, a_, x = previa({"remoteJid": "z@s.whatsapp.net", "lastMessage": {
         "key": {"fromMe": True}, "messageType": "audioMessage",
         "message": {"audioMessage": {"seconds": 76}}}})
-    assert x == "🎤 1:16", x
+    assert x == "1:16", x
     assert detalhes({"messageType": "conversation",
                      "message": {"conversation": "texto puro"}}) == {"tipo": "conversation"}, (
         "message['conversation'] e' string: nao pode ser tratada como dict"

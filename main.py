@@ -1043,6 +1043,13 @@ class ItemChat(QStyledItemDelegate):
             desenhar_marca(p, area_marca, nome_marca,
                            QColor(P["citacao"] if azul_marca else P["fraco"]))
             cursor += largura_marca(nome_marca, ESCALA.e(18)) + ESCALA.e(5)
+        if not digitando:
+            # o desenho do tipo (imagem, vídeo, áudio…) vem do pacote, não de emoji
+            slot_prev = api.slot_de(chat.get("lastMessage") or {})
+            if slot_prev and pintar_icone_pacote(
+                p, QRectF(cursor, r.top() + ESCALA.e(36), ESCALA.e(18), ESCALA.e(18)), slot_prev
+            ):
+                cursor += ESCALA.e(20)
         if autor:
             rotulo = f"{autor}: "
             p.setPen(QColor(P["fraco"]))
@@ -1350,7 +1357,7 @@ class Balao(QStyledItemDelegate):
         msg = item_de(ix) or {}
         texto = api.text_of(msg)
         if api.foi_apagada(msg):
-            texto = "🚫  " + texto  # medido junto, senao a bolha corta o rotulo
+            texto = "Mensagem apagada"  # medido junto, senao a bolha corta o rotulo
         det = {} if api.foi_apagada(msg) else api.detalhes(msg)
         # HD: recebida vem marcada no payload (midQualityFileSha256); a nossa
         # enviada em HD está no mapa local — as duas viram o mesmo selo
@@ -1406,7 +1413,7 @@ class Balao(QStyledItemDelegate):
         cartao = self._cartao(det)
         alt_txt = larg_txt = alt_linha = 0
         mostra_texto = bool(texto) and cartao not in ("audio", "documento", "local", "contato")
-        if pix is not None and texto.strip() in ("🎬 Vídeo", "🖼 Imagem", "🏷 Figurinha"):
+        if pix is not None and texto.strip() in ("Vídeo", "Imagem", "Figurinha"):
             mostra_texto = False  # o rótulo é para a prévia da lista, não para a bolha
         if mostra_texto:
             # com mídia, a legenda quebra na largura DELA — senão uma legenda de
@@ -2053,21 +2060,28 @@ class Balao(QStyledItemDelegate):
         )
         rotulo, marca, azul = self._rodape_de(msg)
         nome_marca = marca_de_desenho(marca)
-        larg_marca = (largura_marca(nome_marca, alt_rodape) + ESCALA.e(4)) if nome_marca else 0
+        larg_marca = (largura_marca(nome_marca, alt_rodape) + ESCALA.e(3)) if nome_marca else 0
+        # a hora termina ONDE o traço começa: medir os dois pelo mesmo canto é o
+        # que evita um passar por cima do outro (era o caso com o emoji)
+        x_marca = caixa.right() - self.PAD_H - larg_marca
         p.setPen(QColor(P["hora_minha"] if meu else P["fraco_dele"]))
-        p.drawText(
-            QRect(caixa.left(), base_rodape, larg - self.PAD_H - larg_marca, alt_rodape),
-            Qt.AlignRight, rotulo,
-        )
         if nome_marca:
+            p.drawText(
+                QRect(caixa.left(), base_rodape,
+                      max(0, x_marca - caixa.left() - ESCALA.e(3)), alt_rodape),
+                Qt.AlignRight, rotulo,
+            )
             # ✓/✓✓/🕐 traçados: seguem a cor da hora, do lido e a escala do zoom
             cor_marca = P["citacao_bolha"] if azul else (
                 P["hora_minha"] if meu else P["fraco_dele"])
             desenhar_marca(
-                p,
-                QRectF(caixa.right() - self.PAD_H - larg_marca, base_rodape,
-                       larg_marca - ESCALA.e(4), alt_rodape),
+                p, QRectF(x_marca, base_rodape, larg_marca - ESCALA.e(3), alt_rodape),
                 nome_marca, QColor(cor_marca),
+            )
+        else:
+            p.drawText(
+                QRect(caixa.left(), base_rodape, larg - self.PAD_H, alt_rodape),
+                Qt.AlignRight, rotulo,
             )
 
         emojis, quantos = api.resumo_reacoes(msg)
@@ -2173,21 +2187,21 @@ def desenhar_marca(p, area: QRectF, nome: str, cor: QColor):
     ox, oy = float(area.left()), area.top() + (area.height() - lado) / 2
     p.save()
     p.setBrush(Qt.NoBrush)
-    p.setPen(QPen(cor, max(1.0, lado * 0.11), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.setPen(QPen(cor, max(0.9, lado * 0.085), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
 
     def linha(x1, y1, x2, y2):
         p.drawLine(QPointF(ox + lado * x1, oy + lado * y1),
                    QPointF(ox + lado * x2, oy + lado * y2))
 
     if nome == "check":
-        linha(0.06, 0.55, 0.38, 0.86)
-        linha(0.38, 0.86, 0.94, 0.16)
+        linha(0.10, 0.53, 0.38, 0.82)
+        linha(0.38, 0.82, 0.90, 0.19)
     elif nome == "check2":
-        # o de trás menor, o da frente inteiro: é assim no WhatsApp
-        linha(0.00, 0.55, 0.20, 0.78)
-        linha(0.20, 0.78, 0.52, 0.34)
-        linha(0.34, 0.55, 0.54, 0.78)
-        linha(0.54, 0.78, 1.00, 0.12)
+        # o de trás menor, o da frente inteiro, encaixados: é assim no WhatsApp
+        linha(0.00, 0.53, 0.19, 0.74)
+        linha(0.19, 0.74, 0.46, 0.40)
+        linha(0.36, 0.53, 0.56, 0.74)
+        linha(0.56, 0.74, 1.00, 0.16)
     elif nome == "relogio":
         p.drawEllipse(QRectF(ox + lado * 0.07, oy + lado * 0.07, lado * 0.86, lado * 0.86))
         linha(0.50, 0.50, 0.50, 0.24)
@@ -2214,6 +2228,17 @@ def pintar_icone_pacote(p, area: QRectF, slot: str, px: int = 0) -> bool:
     pm = desenho.pixmap(QSize(lado, lado))
     p.drawPixmap(QPointF(area.center().x() - lado / 2, area.center().y() - lado / 2), pm)
     return True
+
+
+def icone_ou_emoji(widget, slot: str, px: int = 22) -> str:
+    """Põe o desenho do pacote no widget e devolve ""; no pacote emoji devolve o emoji."""
+    desenho = icones.icone(PACOTE_ICONES, slot, px)
+    if desenho is None:
+        widget.setIcon(QIcon())
+        return icones.emoji(slot)
+    widget.setIcon(desenho)
+    widget.setIconSize(QSize(px, px))
+    return ""
 
 
 class EmojiModel(QAbstractListModel):
@@ -2889,7 +2914,8 @@ class MiniPlayer(QWidget):
         super().__init__(pai)
         self.audio = audio
         self.setVisible(False)
-        self.b_play = QPushButton("⏸")
+        self.b_play = QPushButton("")
+        self.b_play.setText(icone_ou_emoji(self.b_play, "play", 20))
         fixo(self.b_play, 34)
         self.b_play.clicked.connect(
             lambda: audio.alternar(audio.mid, "", "") if audio.mid else None
@@ -2945,9 +2971,10 @@ class MiniPlayer(QWidget):
         seg = pos // 1000
         total = dur // 1000
         self.rotulo.setText(
-            f"🎤 {self.audio.rotulo}  ·  {seg // 60}:{seg % 60:02d} / {total // 60}:{total % 60:02d}"
+            f"{self.audio.rotulo}  ·  {seg // 60}:{seg % 60:02d} / {total // 60}:{total % 60:02d}"
         )
-        self.b_play.setText("⏸" if self.audio.tocando() else "▶")
+        self.b_play.setText(icone_ou_emoji(
+            self.b_play, "pausar" if self.audio.tocando() else "play", 20))
 
 
 # --------------------------------------------------------------------------- captura
@@ -3101,7 +3128,8 @@ class BarraGravacao(QWidget):
         self.ponto = QLabel("●")
         self.tempo = QLabel("0:00")
         self.onda = _OndaAoVivo(self.picos)
-        self.b_pausa = QPushButton("⏸")
+        self.b_pausa = QPushButton("")
+        self.b_pausa.setText(icone_ou_emoji(self.b_pausa, "pausar", 20))
         fixo(self.b_pausa, 40)
         self.b_pausa.setToolTip("Pausar gravação")
         self.b_pausa.clicked.connect(self._pausa)
@@ -3124,7 +3152,7 @@ class BarraGravacao(QWidget):
 
     def comecar(self):
         self.picos.clear()
-        self.b_pausa.setText("⏸")
+        self.b_pausa.setText(icone_ou_emoji(self.b_pausa, "pausar", 20))
         self.b_pausa.setToolTip("Pausar gravação")
         self.onda.pausada = False
         self._tic()
@@ -3136,11 +3164,12 @@ class BarraGravacao(QWidget):
     def _pausa(self):
         if self.gravador.pausado():
             self.gravador.retomar()
-            self.b_pausa.setText("⏸")
+            self.b_pausa.setText(icone_ou_emoji(self.b_pausa, "pausar", 20))
             self.b_pausa.setToolTip("Pausar gravação")
         else:
             self.gravador.pausar()
-            self.b_pausa.setText("🎤")  # retomar = o microfone, como no Web
+            # retomar = o microfone, como no Web
+            self.b_pausa.setText(icone_ou_emoji(self.b_pausa, "microfone", 20))
             self.b_pausa.setToolTip("Retomar gravação")
         self.onda.pausada = self.gravador.pausado()
         self.onda.update()
@@ -3189,7 +3218,7 @@ class DialogoCamera(QDialog):
             self.dispositivos.addItem(d.description(), d)
         self.dispositivos.currentIndexChanged.connect(self._trocar_camera)
 
-        self.b_foto = QPushButton("📷  Tirar foto")
+        self.b_foto = QPushButton("Tirar foto")
         self.b_foto.clicked.connect(self.tirar_foto)
         self.b_video = QPushButton("⏺  Gravar vídeo")
         self.b_video.clicked.connect(self.alternar_video)
@@ -3356,7 +3385,8 @@ class PlayerMidia(QWidget):
         self.tela = QVideoWidget()
         self.player.setVideoOutput(self.tela)
 
-        self.play = QPushButton("⏸")
+        self.play = QPushButton("")
+        self.play.setText(icone_ou_emoji(self.play, "play", 20))
         fixo(self.play, 40)
         self.play.clicked.connect(self.alternar)
 
@@ -3386,7 +3416,8 @@ class PlayerMidia(QWidget):
         self.player.positionChanged.connect(self._posicao)
         self.player.durationChanged.connect(self.barra.setMaximum)
         self.player.playbackStateChanged.connect(
-            lambda s: self.play.setText("⏸" if s == QMediaPlayer.PlayingState else "▶")
+            lambda s: self.play.setText(icone_ou_emoji(
+                self.play, "pausar" if s == QMediaPlayer.PlayingState else "play", 20))
         )
         self.player.mediaStatusChanged.connect(self._fim_loop)
         self._loop = False
@@ -3554,7 +3585,8 @@ class Visualizador(QDialog):
         quando = datetime.fromtimestamp(msg.get("messageTimestamp", 0)).strftime("%d/%m/%Y %H:%M")
         self.cabecalho.setText(f"{quem}  ·  {quando}   ({self.i + 1}/{len(self.midias)})")
         texto = api.text_of(msg)
-        self.legenda.setText("" if texto.startswith(("🖼", "🎬", "🎤", "📄")) else texto)
+        # mídia sem legenda: o cartão já mostra o que é, o campo fica vazio
+        self.legenda.setText("" if texto in ("Imagem", "Vídeo", "Figurinha", "Documento") else texto)
         self.anterior.setEnabled(self.i > 0)
         self.proximo.setEnabled(self.i < len(self.midias) - 1)
         self._selo_favorita()
@@ -3811,7 +3843,7 @@ class DialogoEnvio(QDialog):
     def _cartao_documento(self, c: pathlib.Path) -> QWidget:
         tamanho = c.stat().st_size if c.exists() else 0
         unidade = f"{tamanho/1_048_576:.1f} MB" if tamanho > 1_048_576 else f"{tamanho/1024:.0f} KB"
-        rotulo = QLabel(f"📄\n\n{c.name}\n{unidade}")
+        rotulo = QLabel(f"{c.name}\n{unidade}")
         rotulo.setAlignment(Qt.AlignCenter)
         rotulo.setStyleSheet(f"font-size:16px; color:{P['texto']};")
         return rotulo
@@ -4285,7 +4317,7 @@ class DadosDoContato(QDialog):
 
         # Sem numero: o Web mostra so' o chevron aqui, o total fica no titulo
         # das abas do painel completo.
-        self.linha_midia = QPushButton("🖼  Mídia, links e docs                                    ›")
+        self.linha_midia = QPushButton("Mídia, links e docs                                    ›")
         self.linha_midia.setCursor(Qt.PointingHandCursor)
         self.linha_midia.setStyleSheet(
             "text-align:left; padding:8px; font-size:14px; background:transparent;"
@@ -4308,7 +4340,7 @@ class DadosDoContato(QDialog):
         corpo.addWidget(b_fav)
 
         linha_mudo = QHBoxLayout()
-        rot = QLabel("🔕  Silenciar notificações")
+        rot = QLabel("Silenciar notificações")
         rot.setStyleSheet("background:transparent;")
         linha_mudo.addWidget(rot, 1)
         self.b_mudo = QPushButton()
@@ -4549,7 +4581,7 @@ class DadosDoContato(QDialog):
                 temp.addAction(rotulo).triggered.connect(
                     lambda _=False, x=seg: self._temporarias(x)
                 )
-            botao("⏳   Mensagens temporárias", None, menu=temp)
+            botao("Mensagens temporárias", None, menu=temp)
 
         if link:
             convite = QMenu(self)
@@ -4688,9 +4720,9 @@ class DadosDoContato(QDialog):
         if not api.esta_mudo(self.j.mudos, self.jid):
             self.b_mudo.setText("Desativado")  # o rótulo é "Silenciar": não está
         elif fim == 0:
-            self.b_mudo.setText("🔕 Sempre")
+            self.b_mudo.setText("Sempre")
         else:
-            self.b_mudo.setText("🔕 " + datetime.fromtimestamp(fim).strftime("até %d/%m %H:%M"))
+            self.b_mudo.setText(datetime.fromtimestamp(fim).strftime("até %d/%m %H:%M"))
 
     def silenciar(self, segundos: int):
         self.j.silenciar(self.jid, segundos)
@@ -5695,7 +5727,7 @@ class Janela(QMainWindow):
         self.b_mais.setMenu(menu_anexo)
 
         # 🎤 com o campo vazio, ➤ com texto — o mesmo botão, como no Web
-        self.b_mic = QPushButton("🎤")
+        self.b_mic = QPushButton("")
         fixo(self.b_mic, 40)
         self.b_mic.setToolTip("Gravar áudio")
         self.b_mic.clicked.connect(self._mic_ou_enviar)
@@ -5888,7 +5920,7 @@ class Janela(QMainWindow):
         esquerda.addWidget(self.faixa_usuario)
         # conexão caída é estado essencial: faixa amarela no topo da lista
         # (como o Web), não um recado no rodapé
-        self.faixa_conexao = QLabel("⚠ Sem conexão com o servidor — reconectando…")
+        self.faixa_conexao = QLabel("Sem conexão com o servidor — reconectando…")
         self.faixa_conexao.setObjectName("faixa_conexao")
         self.faixa_conexao.setWordWrap(True)
         self.faixa_conexao.hide()
@@ -6003,6 +6035,9 @@ class Janela(QMainWindow):
             )
         )
         self.relogio.start(30 * 60 * 1000)
+        # os botões que nascem com desenho (mic, play, busca) já saem com o
+        # pacote escolhido, em vez de emoji até a primeira troca
+        self.aplicar_pacote_icones()
 
     # ---------- carregamento ----------
 
@@ -7145,7 +7180,8 @@ class Janela(QMainWindow):
                 fn()
             return correr
 
-        reagir = menu.addMenu("😊  Reagir")
+        reagir = menu.addMenu("Reagir")
+        self.aplicar_icone_acao(reagir, "mais", "Reagir")
         for emoji in REACOES:
             reagir.addAction(emoji).triggered.connect(
                 lambda _=False, e=emoji, m=msg: self.reagir(m, e)
@@ -7988,13 +8024,7 @@ class Janela(QMainWindow):
     # ---------- ícones (pacote escolhido na configuração) ----------
     def aplicar_icone(self, widget, slot: str, px: int = 22) -> str:
         """Põe o desenho do slot. Devolve o texto a usar: emoji (pacote emoji) ou ''."""
-        desenho = icones.icone(self.pacote_icones, slot, px)
-        if desenho is None:
-            widget.setIcon(QIcon())
-            return icones.emoji(slot)
-        widget.setIcon(desenho)
-        widget.setIconSize(QSize(px, px))
-        return ""
+        return icone_ou_emoji(widget, slot, px)
 
     def aplicar_icone_acao(self, acao, slot: str, rotulo: str, px: int = 18):
         """QAction/QMenu: ícone do pacote, ou o emoji na frente do rótulo (pacote emoji)."""
@@ -8409,7 +8439,7 @@ class Janela(QMainWindow):
             self._caiu = False
             POOL.submit(self._ressincronizar)
         self.statusBar().showMessage(
-            f"⚠ sem conexão ({estado}) — reconectando…" if caiu else f"conexão: {estado}"
+            f"sem conexão ({estado}) — reconectando…" if caiu else f"conexão: {estado}"
         )
 
     def _ressincronizar(self):
@@ -8486,7 +8516,7 @@ class Janela(QMainWindow):
             else:
                 texto = self._grupo_resumo  # "" enquanto a rede não respondeu
         elif api.esta_mudo(self.mudos, jid):
-            texto = "🔕 Silenciada"
+            texto = "Silenciada"
         elif jid in self.fixados:
             texto = "📌 Fixada"
         elif self._online_1a1:
@@ -8509,18 +8539,20 @@ class Janela(QMainWindow):
             self.abrir_dados_do_contato
         )
         if api.esta_mudo(self.mudos, jid):
-            menu.addAction("🔔  Ativar notificações").triggered.connect(
-                lambda: self.silenciar(jid, None)
-            )
+            acao = menu.addAction("Ativar notificações")
+            self.aplicar_icone_acao(acao, "sino_cortado", "Ativar notificações")
+            acao.triggered.connect(lambda: self.silenciar(jid, None))
         else:
-            sub = menu.addMenu("🔕  Silenciar notificações")
+            sub = menu.addMenu("Silenciar notificações")
+            self.aplicar_icone_acao(sub, "sino_cortado", "Silenciar notificações")
             for rotulo, segundos in api.DURACOES_MUDO:
                 sub.addAction(rotulo).triggered.connect(
                     lambda _=False, s=segundos: self.silenciar(jid, s)
                 )
-        menu.addAction(
-            "📌  Desafixar conversa" if jid in self.fixados else "📌  Fixar conversa"
-        ).triggered.connect(lambda: self.alternar_fixado(jid))
+        ja_fixado = jid in self.fixados
+        acao_fix = menu.addAction("Desafixar conversa" if ja_fixado else "Fixar conversa")
+        self.aplicar_icone_acao(acao_fix, "pino", acao_fix.text())
+        acao_fix.triggered.connect(lambda: self.alternar_fixado(jid))
         menu.addSeparator()
         menu.addAction("✉  Marcar como não lida").triggered.connect(
             self.nao_lida_atual
@@ -8530,7 +8562,9 @@ class Janela(QMainWindow):
     def mostrar_menu_usuario(self):
         """Menu do avatar do usuário (faixa da sidebar) — casa da Config global."""
         menu = QMenu(self)
-        menu.addAction("👤  Meu perfil").triggered.connect(self.abrir_meu_perfil)
+        acao_perfil = menu.addAction("Meu perfil")
+        self.aplicar_icone_acao(acao_perfil, "contato", "Meu perfil")
+        acao_perfil.triggered.connect(self.abrir_meu_perfil)
         menu.addAction("🔒  Privacidade").triggered.connect(self.abrir_privacidade)
         menu.addSeparator()
         menu.addAction("⚙  Configurações").triggered.connect(self.abrir_config)
